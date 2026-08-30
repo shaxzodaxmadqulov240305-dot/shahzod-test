@@ -335,8 +335,9 @@ textarea{width:100%;min-height:130px;background:var(--ink-850);border:1px solid 
         <span data-i="2">3. Pastki-o'ng</span>
         <span data-i="3">4. Pastki-chap</span>
       </div>
-      <p class="calib-hint">Nuqta noto'g'ri joyda bo'lsa, rasm ustida to'g'ri joyni bosing — u eng yaqin nuqtani almashtiradi.</p>
+      <p class="calib-hint" id="calibHint"></p>
       <div class="row" style="justify-content:center;margin-top:14px;">
+        <button class="btn btn-ghost btn-sm" id="lockToggleBtn">✏️ Burchakni tuzatish</button>
         <button class="btn btn-ghost btn-sm" id="undoPointBtn">🗑️ Tozalash</button>
         <button class="btn btn-ghost btn-sm" id="retakeBtn">🔄 Qayta olish</button>
         <button class="btn btn-primary" id="analyzeBtn" disabled>👁️ Joylashuvni ko'rish</button>
@@ -507,6 +508,7 @@ const state = {
   keys: {'1': []},        // {variantLabel: ['A'|'B'|'C'|'D'|null, ...]}
   layout: null,
   calibPoints: {},    // {TL:{dx,dy}, TR:{...}, BR:{...}, BL:{...}}
+  calibLocked: true,  // burchaklar qulflangan — tasodifan tegib ketishdan himoya
   naturalScale: 1,
   srcCanvas: document.createElement('canvas'), // full-res captured image
   detected: null,     // array of {q, choice, dark:{A,B,C,D}}
@@ -1313,12 +1315,15 @@ function enterCalibration(){
     ['TL','TR','BR','BL'].forEach(k=>{
       state.calibPoints[k] = { dx: auto[k].x*state.naturalScale, dy: auto[k].y*state.naturalScale };
     });
-    statusEl.textContent = "✅ 4 ta burchak avtomatik topildi. Pastda tekshirib ko'ring — noto'g'ri bo'lsa, rasm ustiga qayta bosing.";
+    statusEl.textContent = "✅ 4 ta burchak avtomatik topildi va qulflandi. Pastda tekshirib ko'ring.";
     statusEl.style.color = 'var(--pass)';
+    state.calibLocked = true;
   } else {
     statusEl.textContent = "⚠️ Burchaklar avtomatik topilmadi. Rasmdagi 4 ta qora kvadratni tegishli burchagiga bosing.";
     statusEl.style.color = 'var(--warn)';
+    state.calibLocked = false;   // qo'lda belgilash kerak
   }
+  updateCalibLockUI();
   updateCalibOrderUI();
   redrawCalib();
   document.getElementById('calibCard').scrollIntoView({behavior:'smooth', block:'start'});
@@ -1456,6 +1461,29 @@ function redrawCalib(){
   });
 }
 
+function updateCalibLockUI(){
+  const btn = document.getElementById('lockToggleBtn');
+  const hint = document.getElementById('calibHint');
+  if(state.calibLocked){
+    btn.textContent = '✏️ Burchakni tuzatish';
+    btn.style.borderColor = '';
+    btn.style.color = '';
+    hint.innerHTML = "🔒 Burchaklar qulflangan — ekranga tasodifan tegib ketsangiz ham joyi o'zgarmaydi. "
+      + "Nuqta noto'g'ri turgan bo'lsa, \"Burchakni tuzatish\" tugmasini bosing.";
+  } else {
+    btn.textContent = '🔓 Tuzatish yoqilgan — qulflash';
+    btn.style.borderColor = 'var(--warn)';
+    btn.style.color = 'var(--warn)';
+    hint.innerHTML = "✏️ Tuzatish yoqilgan: rasm ustida to'g'ri joyni bosing — eng yaqin nuqta o'sha yerga ko'chadi. "
+      + "Tugatgach, qayta qulflab qo'ying.";
+  }
+}
+document.getElementById('lockToggleBtn').addEventListener('click', ()=>{
+  state.calibLocked = !state.calibLocked;
+  updateCalibLockUI();
+  toast(state.calibLocked ? 'Burchaklar qulflandi.' : "Tuzatish yoqildi — kerakli joyni bosing.");
+});
+
 function updateCalibOrderUI(){
   document.querySelectorAll('#calibOrder span').forEach(el=>{
     const i = parseInt(el.dataset.i,10);
@@ -1473,7 +1501,16 @@ function calibPointFromEvent(e){
   const scaleY = calibCanvas.height/rect.height;
   return {dx:(clientX-rect.left)*scaleX, dy:(clientY-rect.top)*scaleY};
 }
+let lockToastAt = 0;
 calibCanvas.addEventListener('click', (e)=>{
+  if(state.calibLocked){
+    const now = Date.now();
+    if(now - lockToastAt > 2500){
+      lockToastAt = now;
+      toast("Burchaklar qulflangan — o'zgartirish uchun \"Burchakni tuzatish\"ni bosing.");
+    }
+    return;
+  }
   const p = calibPointFromEvent(e);
   const midX = calibCanvas.width/2, midY = calibCanvas.height/2;
   let key;
@@ -1489,6 +1526,8 @@ calibCanvas.addEventListener('click', (e)=>{
 
 document.getElementById('undoPointBtn').addEventListener('click', ()=>{
   state.calibPoints = {};
+  state.calibLocked = false;
+  updateCalibLockUI();
   redrawCalib();
   updateCalibOrderUI();
   exitAlignPreview();
@@ -1528,6 +1567,8 @@ document.getElementById('analyzeBtn').addEventListener('click', ()=>{
     statusEl.style.color = 'var(--warn)';
   }
   previewH = computeHomography(src, dst);
+  state.calibLocked = true;      // tahlil bosqichida tasodifan siljib ketmasin
+  updateCalibLockUI();
 
   redrawCalib();
   calibCtx.fillStyle = 'rgba(213,68,46,0.85)';
@@ -2005,6 +2046,205 @@ function renderAppContacts(){
   document.getElementById('fPhoneLine').innerHTML = phones.length
     ? "Bog'lanish: " + phones.map(p=>`<a href="tel:${p.replace(/[^\d+]/g,'')}">${p}</a>`).join(' · ')
     : '';
+}
+
+/* =========================================================
+   ZAXIRA NUSXA (backup / restore)
+   ========================================================= */
+const BACKUP_VERSION = 1;
+
+function buildBackup(){
+  return {
+    app: 'ShahzodTest', version: BACKUP_VERSION, savedAt: new Date().toISOString(),
+    config: {
+      count: state.count, optCount: state.optCount,
+      schoolName: state.schoolName, testName: state.testName, subjectName: state.subjectName
+    },
+    brand: state.brand,
+    variants: state.variants, keys: state.keys, history: state.history
+  };
+}
+
+function downloadText(filename, text, mime){
+  const blob = new Blob([text], {type: mime || 'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 1500);
+}
+
+function renderBackupInfo(){
+  const el = document.getElementById('backupInfo');
+  const lb = state.lastBackup;
+  if(!lb){
+    el.textContent = state.history.length
+      ? `Hali zaxira olinmagan · ${state.history.length} ta natija xavf ostida.`
+      : 'Hali zaxira olinmagan.';
+    el.style.color = state.history.length ? 'var(--warn)' : 'var(--muted)';
+    return;
+  }
+  const d = new Date(lb.at);
+  const fresh = state.history.length - (lb.count || 0);
+  el.textContent = `Oxirgi zaxira: ${d.toLocaleDateString('uz-UZ')} ${d.toLocaleTimeString('uz-UZ',{hour:'2-digit',minute:'2-digit'})}`
+    + (fresh > 0 ? ` · o'shandan keyin ${fresh} ta yangi natija qo'shildi.` : ' · hammasi zaxiralangan.');
+  el.style.color = fresh >= 5 ? 'var(--warn)' : 'var(--muted)';
+}
+
+function markBackedUp(){
+  state.lastBackup = { at: new Date().toISOString(), count: state.history.length };
+  storageSet('lastBackup', state.lastBackup);
+  renderBackupInfo();
+}
+
+function backupFileName(){
+  const d = new Date();
+  const p2 = n => String(n).padStart(2,'0');
+  return `shahzod-test-zaxira-${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())}.json`;
+}
+
+function doBackup(){
+  const text = JSON.stringify(buildBackup(), null, 1);
+  try{
+    downloadText(backupFileName(), text);
+    markBackedUp();
+    toast('Zaxira fayli yuklab olindi.');
+  }catch(e){
+    console.error(e);
+    showBackupText(text);
+    toast("Fayl yuklanmadi — matnni nusxalab saqlang.");
+  }
+}
+document.getElementById('backupBtn').addEventListener('click', doBackup);
+
+function showBackupText(text){
+  document.getElementById('backupText').value = text || JSON.stringify(buildBackup());
+  document.getElementById('backupTextWrap').style.display = 'block';
+}
+document.getElementById('showBackupTextBtn').addEventListener('click', ()=>showBackupText());
+document.getElementById('hideBackupTextBtn').addEventListener('click', ()=>{
+  document.getElementById('backupTextWrap').style.display = 'none';
+});
+document.getElementById('copyBackupBtn').addEventListener('click', ()=>{
+  const ta = document.getElementById('backupText');
+  ta.select(); ta.setSelectionRange(0, ta.value.length);
+  let ok = false;
+  try{ ok = document.execCommand('copy'); }catch(e){ ok = false; }
+  if(!ok && navigator.clipboard){ navigator.clipboard.writeText(ta.value).then(()=>toast('Nusxalandi.')); return; }
+  toast(ok ? 'Nusxalandi.' : "Nusxalab bo'lmadi — matnni qo'lda belgilab oling.");
+  if(ok) markBackedUp();
+});
+
+/* ---- tiklash ---- */
+let pendingRestore = null;
+
+function parseBackup(text){
+  const b = JSON.parse(text);
+  if(!b || !Array.isArray(b.history) || typeof b.keys !== 'object'){
+    throw new Error('Fayl tuzilishi mos emas');
+  }
+  return b;
+}
+
+function askRestore(b){
+  pendingRestore = b;
+  const d = b.savedAt ? new Date(b.savedAt) : null;
+  const known = new Set(state.history.map(h=>h.id));
+  const fresh = b.history.filter(h=>!known.has(h.id)).length;
+  document.getElementById('restoreSummary').innerHTML =
+    `<b>Zaxira topildi.</b><br>Sana: ${d ? d.toLocaleString('uz-UZ') : "noma'lum"} · `
+    + `${b.history.length} ta natija · ${Object.keys(b.keys||{}).length} ta variant kaliti.<br>`
+    + `<span style="color:var(--muted)">Birlashtirilsa, mavjud ma'lumot saqlanadi va ${fresh} ta yangi natija qo'shiladi. `
+    + `To'liq almashtirilsa, hozirgi ${state.history.length} ta natija va kalitlar o'chib, zaxiradagisi qo'yiladi.</span>`;
+  document.getElementById('restoreConfirm').style.display = 'block';
+  document.getElementById('restoreConfirm').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+document.getElementById('restoreInput').addEventListener('change', (e)=>{
+  const f = e.target.files[0];
+  if(!f) return;
+  const rd = new FileReader();
+  rd.onload = ev => {
+    try{ askRestore(parseBackup(ev.target.result)); }
+    catch(err){ toast("Zaxira faylini o'qib bo'lmadi: " + err.message); }
+  };
+  rd.onerror = ()=> toast("Faylni o'qib bo'lmadi.");
+  rd.readAsText(f);
+  e.target.value = '';
+});
+
+document.getElementById('applyBackupTextBtn').addEventListener('click', ()=>{
+  try{ askRestore(parseBackup(document.getElementById('backupText').value)); }
+  catch(err){ toast("Matn zaxira formatiga mos emas: " + err.message); }
+});
+document.getElementById('restoreCancelBtn').addEventListener('click', ()=>{
+  pendingRestore = null;
+  document.getElementById('restoreConfirm').style.display = 'none';
+});
+
+function afterRestore(msg){
+  document.getElementById('restoreConfirm').style.display = 'none';
+  pendingRestore = null;
+  document.getElementById('countSelect').value = String(state.count);
+  document.getElementById('optCountSelect').value = String(state.optCount);
+  document.getElementById('schoolNameInput').value = state.schoolName;
+  document.getElementById('testNameInput').value = state.testName;
+  document.getElementById('subjectNameInput').value = state.subjectName;
+  applyBrandToUI();
+  renderSheet(); renderVariantTabs(); renderKeyGrid(); renderHistory(); renderBackupInfo();
+  saveConfig(); saveBrand();
+  storageSet('variants', state.variants);
+  storageSet('keys', state.keys);
+  storageSet('history', state.history);
+  toast(msg);
+}
+
+document.getElementById('restoreMergeBtn').addEventListener('click', ()=>{
+  const b = pendingRestore; if(!b) return;
+  const known = new Set(state.history.map(h=>h.id));
+  let added = 0;
+  (b.history||[]).forEach(h=>{ if(!known.has(h.id)){ state.history.push(h); added++; } });
+  state.history.sort((x,y)=> new Date(y.ts) - new Date(x.ts));
+  let newVars = 0;
+  (b.variants||[]).forEach(v=>{
+    const imported = (b.keys||{})[v];
+    if(!imported) return;
+    const cur = state.keys[v];
+    const curEmpty = !cur || !cur.some(Boolean);
+    if(!state.variants.includes(v)){ state.variants.push(v); newVars++; }
+    if(curEmpty && imported.length === state.count) state.keys[v] = imported.slice();
+  });
+  afterRestore(`Birlashtirildi: ${added} ta yangi natija, ${newVars} ta yangi variant.`);
+});
+
+document.getElementById('restoreReplaceBtn').addEventListener('click', ()=>{
+  const b = pendingRestore; if(!b) return;
+  if(b.config){
+    state.count = b.config.count || state.count;
+    state.optCount = b.config.optCount || state.optCount;
+    state.schoolName = b.config.schoolName || state.schoolName;
+    state.testName = b.config.testName || state.testName;
+    state.subjectName = b.config.subjectName || state.subjectName;
+  }
+  state.variants = (b.variants && b.variants.length) ? b.variants.slice() : ['1'];
+  state.keys = {};
+  state.variants.forEach(v=>{
+    const k = (b.keys||{})[v];
+    state.keys[v] = (k && k.length === state.count) ? k.slice() : new Array(state.count).fill(null);
+  });
+  state.currentKeyVariant = state.variants[0];
+  state.history = (b.history||[]).slice();
+  if(b.brand) state.brand = Object.assign(JSON.parse(JSON.stringify(BRAND_DEFAULT)), b.brand);
+  afterRestore(`Zaxiradan tiklandi: ${state.history.length} ta natija.`);
+});
+
+/* ---- xotira ishlayaptimi? ---- */
+async function checkStorage(){
+  try{
+    await storageSet('__probe', 1);
+    const v = await storageGet('__probe', null);
+    return v === 1;
+  }catch(e){ return false; }
 }
 
 /* =========================================================
