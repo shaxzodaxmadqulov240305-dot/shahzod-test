@@ -274,6 +274,7 @@ textarea{width:100%;min-height:130px;background:var(--ink-850);border:1px solid 
     <div class="card">
       <h2>To'g'ri javoblar kaliti</h2>
       <p class="sub">Har bir variant uchun alohida kalit kiriting. Barchasi qurilmangizda saqlanadi.</p>
+      <div class="warn-box" id="keyStorageWarn" style="display:none;"></div>
       <div class="row" style="margin-bottom:14px;" id="variantTabs"></div>
       <div class="row" style="margin-bottom:14px;">
         <button class="btn btn-ghost btn-sm" id="addVariantBtn">➕ Yangi variant</button>
@@ -524,14 +525,46 @@ const state = {
   lastCaptureMethod: null
 };
 
+/* Ma'lumot ikki xil joyda saqlanishi mumkin:
+   1) Claude ko'rish oynasida — window.storage;
+   2) oddiy saytda/brauzerda — localStorage.
+   Qaysi biri mavjud bo'lsa, o'shanisi ishlatiladi. */
+const HAS_HOST_STORAGE = (typeof window !== 'undefined' && window.storage
+  && typeof window.storage.get === 'function' && typeof window.storage.set === 'function');
+const LS_PREFIX = 'shahzodtest:';
+
 async function storageGet(key, fallback){
   try{
-    const r = await window.storage.get(key, false);
-    return r ? JSON.parse(r.value) : fallback;
+    if(HAS_HOST_STORAGE){
+      const r = await window.storage.get(key, false);
+      return r ? JSON.parse(r.value) : fallback;
+    }
+    const v = localStorage.getItem(LS_PREFIX + key);
+    return (v === null || v === undefined) ? fallback : JSON.parse(v);
   }catch(e){ return fallback; }
 }
+
+let saveFailAt = 0;
 async function storageSet(key, value){
-  try{ await window.storage.set(key, JSON.stringify(value), false); }catch(e){ /* silent */ }
+  try{
+    if(HAS_HOST_STORAGE){
+      await window.storage.set(key, JSON.stringify(value), false);
+      return true;
+    }
+    localStorage.setItem(LS_PREFIX + key, JSON.stringify(value));
+    return true;
+  }catch(e){
+    console.error('Saqlash xatosi:', key, e);
+    const now = Date.now();
+    if(now - saveFailAt > 8000){
+      saveFailAt = now;
+      const full = (e && (e.name === 'QuotaExceededError' || String(e).includes('quota')));
+      toast(full
+        ? "Xotira to'lgan — eski natijalarni o'chiring yoki zaxira olib, tarixni tozalang."
+        : "DIQQAT: ma'lumot saqlanmadi! Zaxira faylini yuklab oling.");
+    }
+    return false;
+  }
 }
 
 function toast(msg){
@@ -2293,11 +2326,15 @@ async function checkStorage(){
   renderBackupInfo();
 
   if(!(await checkStorage())){
-    const w = document.getElementById('storageWarn');
-    w.style.display = 'block';
-    w.innerHTML = "<b>Diqqat: bu qurilmada natijalar saqlanmayapti.</b><br>"
-      + "Sahifani yopsangiz, kalitlar ham, natijalar ham yo'qoladi. Ish oxirida albatta "
-      + "zaxira faylini yuklab oling yoki Excelga eksport qiling.";
+    const msg = "<b>Diqqat: bu qurilmada ma'lumot saqlanmayapti.</b><br>"
+      + "Sahifani yopsangiz, kalitlar ham, natijalar ham yo'qoladi. Sabab odatda brauzerning "
+      + "\"maxfiy rejimi\" (Incognito) yoki sayt ma'lumotlarini saqlash taqiqlangani bo'ladi. "
+      + "Oddiy oynada oching yoki ish oxirida albatta zaxira faylini yuklab oling.";
+    ['storageWarn','keyStorageWarn'].forEach(id=>{
+      const w = document.getElementById(id);
+      if(w){ w.style.display = 'block'; w.innerHTML = msg; }
+    });
+    toast("Ma'lumot saqlanmayapti — pastdagi ogohlantirishni o'qing.");
   }
 })();
 </script>
