@@ -426,6 +426,7 @@ textarea{width:100%;min-height:130px;background:var(--ink-850);border:1px solid 
       <p class="sub">Natijalar yuqori balldan pastga qarab tartiblangan (reyting).</p>
       <div class="row" style="margin-bottom:12px;">
         <button class="btn btn-stamp btn-sm" id="exportExcelBtn">📊 Excel (.xlsx) ga eksport</button>
+        <button class="btn btn-stamp btn-sm" id="reportBtn">🖨️ Logotipli hisobot</button>
         <select id="histSort" title="Tartib">
           <option value="score">Tartib: ball bo'yicha</option>
           <option value="id">Tartib: ID bo'yicha</option>
@@ -983,9 +984,9 @@ function standalonePrintHTML(pages, rawHtml){
     + '</body></html>';
 }
 
-function downloadPrintFile(pages, rawHtml){
+function downloadPrintFile(pages, rawHtml, filename){
   try{
-    downloadText('javoblar-varaqasi.html', standalonePrintHTML(pages, rawHtml), 'text/html');
+    downloadText(filename || 'javoblar-varaqasi.html', standalonePrintHTML(pages, rawHtml), 'text/html');
     toast("Fayl yuklab olindi — uni ochsangiz, chop etish oynasi o'zi chiqadi.");
   }catch(e){
     console.error(e);
@@ -993,13 +994,13 @@ function downloadPrintFile(pages, rawHtml){
   }
 }
 
-function printSheets(pages, rawHtml){
-  if(printBlocked()){ downloadPrintFile(pages, rawHtml); return; }
+function printSheets(pages, rawHtml, filename){
+  if(printBlocked()){ downloadPrintFile(pages, rawHtml, filename); return; }
   const area = document.getElementById('printArea');
   area.innerHTML = rawHtml ? pages.join('') : pages.map(p=>`<div class="print-page">${p}</div>`).join('');
   setTimeout(()=>{
     try{ window.print(); }
-    catch(e){ console.error(e); downloadPrintFile(pages, rawHtml); }
+    catch(e){ console.error(e); downloadPrintFile(pages, rawHtml, filename); }
   }, 60);
 }
 
@@ -2274,6 +2275,51 @@ document.getElementById('clearHistBtn').addEventListener('click', (e)=>{
   storageSet('history', state.history);
 });
 
+/* ---- chop etish uchun logotipli natijalar hisoboti ---- */
+function reportHTML(){
+  const rows = orderedHistory();
+  const logo = state.brand.logo || LOGO_URI;
+  const d = new Date();
+  const avg = rows.length ? Math.round(rows.reduce((a,o)=>a+o.h.percent,0)/rows.length) : 0;
+  const best = rows.length ? Math.max(...rows.map(o=>o.h.percent)) : 0;
+
+  let h = `<div style="font-family:'Segoe UI',Arial,sans-serif;color:#111;background:#fff;padding:13mm 11mm;">`;
+  h += `<div style="display:flex;align-items:center;gap:14px;border-bottom:2.5px solid #111;padding-bottom:10px;">
+          <img src="${logo}" style="height:66px;object-fit:contain;">
+          <div>
+            <div style="font-size:16pt;font-weight:700;line-height:1.2;">${escXml(state.schoolName)}</div>
+            <div style="font-size:11pt;color:#444;margin-top:3px;">${escXml(state.testName)}${state.subjectName ? ' · ' + escXml(state.subjectName) : ''}</div>
+          </div>
+          <div style="margin-left:auto;text-align:right;font-size:10pt;color:#444;line-height:1.5;">
+            <div>${d.toLocaleDateString('uz-UZ')}</div>
+            <div>${rows.length} ta o'quvchi</div>
+          </div>
+        </div>`;
+  h += `<div style="font-size:13.5pt;font-weight:700;margin:14px 0 8px;">Test natijalari</div>`;
+  h += `<table style="width:100%;border-collapse:collapse;font-size:10.5pt;"><thead><tr style="background:#ececec;">`
+     + ["O'rin","ID","O'quvchi","Variant","To'g'ri","Foiz","Baho"]
+        .map(t=>`<th style="border:1px solid #888;padding:5px 7px;">${t}</th>`).join('')
+     + `</tr></thead><tbody>`;
+  rows.forEach(({h:r, rank})=>{
+    const cells = [rank, r.studentId || '—', displayName(r), r.variant || '—',
+                   `${r.correct}/${r.total}`, r.percent + '%', r.grade];
+    h += `<tr>` + cells.map((v,i)=>
+      `<td style="border:1px solid #bbb;padding:4px 7px;${i===2 ? '' : 'text-align:center;'}">${escXml(v)}</td>`
+    ).join('') + `</tr>`;
+  });
+  h += `</tbody></table>`;
+  h += `<div style="margin-top:12px;font-size:10.5pt;">O'rtacha natija: <b>${avg}%</b> · Eng yuqori natija: <b>${best}%</b></div>`;
+  h += `<div style="margin-top:30px;display:flex;justify-content:space-between;font-size:10.5pt;">
+          <div>O'qituvchi: ____________________</div><div>Imzo: ____________________</div></div>`;
+  h += `</div>`;
+  return h;
+}
+
+document.getElementById('reportBtn').addEventListener('click', ()=>{
+  if(!state.history.length){ toast("Hisobot uchun hali natija yo'q."); return; }
+  printSheets([reportHTML()], true, 'natijalar-hisoboti.html');
+});
+
 document.getElementById('exportExcelBtn').addEventListener('click', ()=>{
   if(!state.history.length){
     toast("Eksport qilish uchun hali natija yo'q.");
@@ -2300,7 +2346,20 @@ document.getElementById('exportExcelBtn').addEventListener('click', ()=>{
       "Vaqt": d.toLocaleTimeString('uz-UZ',{hour:'2-digit',minute:'2-digit'})
     };
   });
-  const ws = XLSX.utils.json_to_sheet(rows);
+  const titleRow = state.testName + (state.subjectName ? ' · ' + state.subjectName : '');
+  const dt = new Date();
+  const ws = XLSX.utils.aoa_to_sheet([
+    [state.schoolName],
+    [titleRow],
+    ['Sana: ' + dt.toLocaleDateString('uz-UZ') + '   ·   Jami: ' + rows.length + " ta o'quvchi"],
+    []
+  ]);
+  XLSX.utils.sheet_add_json(ws, rows, {origin: 'A5'});
+  ws['!merges'] = [
+    {s:{r:0,c:0}, e:{r:0,c:6}},
+    {s:{r:1,c:0}, e:{r:1,c:6}},
+    {s:{r:2,c:0}, e:{r:2,c:6}}
+  ];
   ws['!cols'] = [{wch:6},{wch:7},{wch:24},{wch:10},{wch:9},{wch:12},{wch:11},{wch:14},{wch:12},{wch:8}];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Natijalar');
