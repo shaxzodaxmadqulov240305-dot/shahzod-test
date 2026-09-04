@@ -141,6 +141,20 @@ select:focus,input:focus{outline:2px solid var(--stamp);outline-offset:1px;}
 textarea{width:100%;min-height:130px;background:var(--ink-850);border:1px solid var(--ink-700);color:var(--paper-100);border-radius:8px;padding:10px;font-family:'IBM Plex Mono',monospace;font-size:0.72rem;resize:vertical;}
 .history-item .hdel{background:none;border:none;color:var(--muted);cursor:pointer;font-size:0.95rem;line-height:1;padding:3px 7px;border-radius:6px;margin-left:10px;}
 .history-item .hdel:hover{color:var(--redpen);background:rgba(213,68,46,.12);}
+.history-item .hdel.armed{background:var(--redpen);color:#fff;font-size:0.72rem;font-weight:600;padding:5px 9px;line-height:1.1;}
+.ans-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(54px,1fr));gap:5px;margin-top:10px;}
+.ans-cell{border-radius:6px;padding:4px 2px;text-align:center;font-family:'IBM Plex Mono',monospace;font-size:0.74rem;line-height:1.2;border:1px solid var(--ink-700);}
+.ans-cell .qn{color:var(--muted);font-size:0.62rem;display:block;margin-bottom:1px;}
+.ans-ok{background:rgba(62,154,102,.16);border-color:rgba(62,154,102,.5);color:var(--pass);}
+.ans-bad{background:rgba(213,68,46,.16);border-color:rgba(213,68,46,.5);color:#EE8C77;}
+.ans-empty{background:rgba(147,152,158,.10);color:var(--muted);}
+.ans-multi{background:rgba(214,163,57,.16);border-color:rgba(214,163,57,.5);color:var(--warn);}
+.hist-detail{margin:2px 0 10px;padding:12px 14px;background:var(--ink-850);border:1px solid var(--ink-700);border-radius:8px;}
+.history-item{cursor:pointer;}
+.legend{font-size:0.75rem;color:var(--muted);margin-top:8px;line-height:1.5;}
+.stat-row{display:flex;align-items:center;gap:8px;font-size:0.82rem;margin-bottom:5px;}
+.stat-bar{flex:1;height:9px;border-radius:5px;background:var(--ink-800);overflow:hidden;}
+.stat-bar span{display:block;height:100%;background:var(--stamp);}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--ink-850);border:1px solid var(--ink-700);color:var(--paper-100);padding:10px 18px;border-radius:8px;font-size:0.85rem;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;z-index:50;}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(-6px);}
 
@@ -433,7 +447,20 @@ textarea{width:100%;min-height:130px;background:var(--ink-850);border:1px solid 
         </select>
         <button class="btn btn-ghost btn-sm" id="clearHistBtn">Tarixni tozalash</button>
       </div>
+      <p class="sub" style="margin:-6px 0 10px;">Natija ustiga bosing — o'sha o'quvchining har bir savol bo'yicha javoblari ochiladi.</p>
       <div class="history-list" id="historyList"></div>
+    </div>
+
+    <div class="card">
+      <h2>Umumiy statistika</h2>
+      <p class="sub">Savollar bo'yicha tahlil: qaysi savolda ko'pchilik xato qilgan.</p>
+      <div class="row" style="margin-bottom:12px;">
+        <div>
+          <label class="field-label">Variant</label>
+          <select id="statVariant"></select>
+        </div>
+      </div>
+      <div id="statBody"></div>
     </div>
 
     <div class="card">
@@ -550,6 +577,8 @@ const state = {
   rosterList: [],         // [{id, name}]
   overrides: null,    // array mirrors detected but editable
   history: [],
+  openDetail: null,       // tarixda ochilgan natija
+  pendingDelete: null,    // o'chirish tasdiqlanishini kutayotgan natija
   brand: JSON.parse(JSON.stringify(BRAND_DEFAULT)),
   lastBackup: null,
   stream: null,
@@ -634,10 +663,16 @@ const PAGE_W = 1000, PAGE_H = 1414;
 const CORNER = {
   TL:{x:60,y:60}, TR:{x:940,y:60}, BR:{x:940,y:1354}, BL:{x:60,y:1354}
 };
-const COL_XS = [130, 397, 664];
+const COL_XS = [190, 590];          // ikkita ustun
+const COL_DIV = [500];              // ustunlar orasidagi chiziq
 /* Yo'nalish belgisi: "mark" — qora chiziq, "ref" — uning 180 daraja aylantirilgandagi
    (doim bo'sh) joyi. Ikkalasining yorqinligi solishtirilib, varaq qay tomonga
    qaragani aniqlanadi. */
+/* Qator belgilari (timing marks): har bir qator uchun chap va o'ng chekkada
+   bittadan kichik qora to'rtburchak. Ular yordamida har bir qatorning aniq
+   joyi o'lchanadi — qog'oz bukilgan yoki ksero nusxa kichraygan bo'lsa ham. */
+const TIM = { xs: [68, 148, 548, 845], w: 18, h: 9 };
+
 const ORIENT = {
   mark: {x:70, y:140},                       // qora chiziq
   refs: [{x:70, y:114}, {x:70, y:166}],      // chiziqning ustidagi va ostidagi bo'sh joy
@@ -657,19 +692,19 @@ const HEADER_H = 600; // titul uchun joy: sarlavha + ma'lumot bloki + sinf/telef
 const IDF  = { rows:3, cols:10, x0:200, dx:26, y0:430, dy:22, r:9 };
 const VARF = { count:6, x0:745, dx:28, y:430, r:9 };
 const INFO = { y:178, h:310 };
-const FOOTER_RESERVE = 180; // pastki kontakt bloki uchun joy
+const FOOTER_RESERVE = 144; // pastki kontakt bloki uchun joy
 const START_Y = HEADER_H;
 const FOOT_Y = 1290;  // pastki blok boshlanish chizig'i
 
 function buildLayout(count){
   const availH = PAGE_H - START_Y - FOOTER_RESERVE;
-  const rows = Math.ceil(count/3);
+  const rows = Math.ceil(count/COL_XS.length);
   const rowHeight = Math.max(22, Math.min(34, Math.floor(availH/rows)));
   const radius = Math.max(8, Math.min(getOptSpacing()*0.275, rowHeight*0.42));
   const optOffsets = getOptOffsets();
   const items = [];
   let q = 1;
-  for(let col=0; col<3; col++){
+  for(let col=0; col<COL_XS.length; col++){
     for(let row=0; row<rows; row++){
       if(q>count) break;
       const cy = START_Y + row*rowHeight + rowHeight/2;
@@ -804,8 +839,9 @@ function buildSheetSVG(layout){
   s += `<text x="500" y="${gridTop+25}" text-anchor="middle" font-size="19" font-weight="700" letter-spacing="1.2" fill="#161616">${escXml(state.subjectName)}</text>`;
   s += `<line x1="100" y1="${subjY}" x2="900" y2="${subjY}" stroke="#333" stroke-width="1.2"/>`;
   s += `<line x1="100" y1="${headY}" x2="900" y2="${headY}" stroke="#333" stroke-width="1.2"/>`;
-  s += `<line x1="367" y1="${subjY}" x2="367" y2="${gridBottom}" stroke="#333" stroke-width="1.2"/>`;
-  s += `<line x1="634" y1="${subjY}" x2="634" y2="${gridBottom}" stroke="#333" stroke-width="1.2"/>`;
+  COL_DIV.forEach(x=>{
+    s += `<line x1="${x}" y1="${subjY}" x2="${x}" y2="${gridBottom}" stroke="#333" stroke-width="1.2"/>`;
+  });
 
   /* savol raqami, variant harfi va halqa qalinligi — dumaloq radiusiga moslashadi */
   const numFont    = Math.round(Math.max(11, Math.min(17, r*1.15))*10)/10;
@@ -817,6 +853,14 @@ function buildSheetSVG(layout){
       s += `<text x="${colX+layout.optOffsets[k]}" y="${START_Y-13}" text-anchor="middle" font-size="${optFont}" font-weight="700" fill="#333">${k}</text>`;
     }
   });
+
+  /* qator belgilari — chap va o'ng chekkada, har bir qator uchun bittadan */
+  for(let row=0; row<layout.rows; row++){
+    const cy = START_Y + row*layout.rowHeight + layout.rowHeight/2;
+    TIM.xs.forEach(tx=>{
+      s += `<rect x="${tx-TIM.w/2}" y="${cy-TIM.h/2}" width="${TIM.w}" height="${TIM.h}" fill="#161616"/>`;
+    });
+  }
 
   layout.items.forEach(it=>{
     s += `<text x="${it.colX-6}" y="${it.cy+numFont*0.36}" text-anchor="end" font-size="${numFont}" font-weight="600" fill="#222" font-family="IBM Plex Mono, monospace">${it.q}</text>`;
@@ -1225,7 +1269,7 @@ document.querySelectorAll('.step-btn').forEach(btn=>{
     document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('panel-'+btn.dataset.step).classList.add('active');
-    if(btn.dataset.step==='history') renderHistory();
+    if(btn.dataset.step==='history'){ renderHistory(); renderStats(); }
   });
 });
 
@@ -1895,7 +1939,9 @@ document.getElementById('confirmAnalyzeBtn').addEventListener('click', async ()=
   const h = previewH;
   const sctx = state.srcCanvas.getContext('2d');
 
-  function sampleLum(cx, cy, rr){
+  function sampleLum(cx0, cy0, rr, off){
+    const cx = cx0 + (off ? off.dtx : 0);
+    const cy = cy0 + (off ? off.dty : 0);
     const pts = [
       mapPoint(h,cx-rr,cy), mapPoint(h,cx+rr,cy),
       mapPoint(h,cx,cy-rr), mapPoint(h,cx,cy+rr)
@@ -1916,17 +1962,188 @@ document.getElementById('confirmAnalyzeBtn').addEventListener('click', async ()=
     }catch(e){ return 255; }
   }
 
+  /* ---- qator belgilarini topish: butun chekka bo'ylab bir marta skanerlanadi ----
+     Qog'oz bukilgan yoki nusxa kichraygan bo'lsa belgi kutilgan joydan ancha
+     siljigan bo'lishi mumkin, shuning uchun tor oyna emas, butun chiziq qidiriladi. */
+  const rowsN = state.layout.rows;
+  function stripOffsets(templX){
+    const pad = Math.max(20, state.layout.rowHeight*1.7);
+    const yTop = START_Y - pad;
+    const yBot = START_Y + state.layout.rows*state.layout.rowHeight + pad;
+    /* Butun chiziq bo'ylab piksellarni bir marta o'qib olamiz, lekin tahlilni
+       VARAQ koordinatalarida qilamiz — shunda varaq qiya yoki burilgan bo'lsa ham
+       oynaga begona narsa qo'shilmaydi. */
+    const corners = [mapPoint(h,templX-14,yTop), mapPoint(h,templX+14,yTop),
+                     mapPoint(h,templX+14,yBot), mapPoint(h,templX-14,yBot)];
+    let x0 = Math.max(0, Math.floor(Math.min(...corners.map(p=>p.x))) - 2);
+    let x1 = Math.min(state.srcCanvas.width,  Math.ceil(Math.max(...corners.map(p=>p.x))) + 2);
+    let y0 = Math.max(0, Math.floor(Math.min(...corners.map(p=>p.y))) - 2);
+    let y1 = Math.min(state.srcCanvas.height, Math.ceil(Math.max(...corners.map(p=>p.y))) + 2);
+    const bw = x1-x0, bh = y1-y0;
+    const out = new Array(rowsN).fill(null);
+    if(bw < 4 || bh < 20) return out;
+    let data;
+    try{ data = sctx.getImageData(x0, y0, bw, bh).data; }catch(e){ return out; }
+    const lum = new Float32Array(bw*bh);
+    for(let i2=0;i2<bw*bh;i2++){
+      lum[i2] = 0.299*data[i2*4]+0.587*data[i2*4+1]+0.114*data[i2*4+2];
+    }
+    const px = (ix, iy) => {
+      const a = Math.round(ix)-x0, b = Math.round(iy)-y0;
+      if(a<0||b<0||a>=bw||b>=bh) return 255;
+      return lum[b*bw+a];
+    };
+    const sampleT = (tx, ty) => { const p = mapPoint(h, tx, ty); return px(p.x, p.y); };
+
+    // 1) chiziq bo'ylab qorong'ilik profili (varaq koordinatalarida)
+    const step = 0.5;
+    const prof = [], ys = [];
+    for(let ty = yTop; ty <= yBot; ty += step){
+      let sum = 0, n = 0;
+      for(let dx = -6; dx <= 6; dx += 3){ sum += sampleT(templX+dx, ty); n++; }
+      prof.push(sum/n); ys.push(ty);
+    }
+    const sorted = prof.slice().sort((a,b)=>a-b);
+    const paper = sorted[Math.floor(sorted.length*0.7)] || 230;
+    const thr = paper*0.62;
+
+    // 2) bandlarni ajratish
+    const bands = [];
+    let k2 = 0;
+    while(k2 < prof.length){
+      if(prof[k2] < thr){
+        let s2 = k2, wsum = 0, wy = 0;
+        while(k2 < prof.length && prof[k2] < thr){
+          const g = thr - prof[k2];
+          wsum += g; wy += ys[k2]*g; k2++;
+        }
+        const heightT = (k2 - s2)*step;
+        if(wsum > 0 && heightT >= 1.5 && heightT <= state.layout.rowHeight*0.55){
+          bands.push({ty: wy/wsum, h: heightT});
+        }
+      } else k2++;
+    }
+    if(!bands.length) return out;
+
+    // 3) har bir band uchun x-markazini ham o'lchaymiz
+    bands.forEach(b=>{
+      let wsum = 0, wx = 0;
+      for(let dx = -12; dx <= 12; dx += 0.5){
+        const v = sampleT(templX+dx, b.ty);
+        if(v < thr){ const g = thr - v; wsum += g; wx += (templX+dx)*g; }
+      }
+      b.tx = wsum > 0 ? wx/wsum : templX;
+    });
+
+    // 4) qatorlarga moslashtirish — oraliq mos kelishi shart
+    const pitch = state.layout.rowHeight;
+    const exp = [];
+    for(let row=0; row<rowsN; row++) exp.push(START_Y + row*pitch + pitch/2);
+
+    if(bands.length >= rowsN){
+      let bestK = 0, bestErr = Infinity;
+      for(let k3=0; k3 + rowsN <= bands.length; k3++){
+        let err = 0;
+        for(let i3=1;i3<rowsN;i3++){
+          const d = (bands[k3+i3].ty - bands[k3].ty) - (exp[i3] - exp[0]);
+          err += d*d;
+        }
+        const shift = bands[k3].ty - exp[0];
+        err += shift*shift*0.05;
+        if(err < bestErr){ bestErr = err; bestK = k3; }
+      }
+      if(Math.sqrt(bestErr/rowsN) < pitch*0.5){
+        for(let i3=0;i3<rowsN;i3++){
+          out[i3] = {dtx: bands[bestK+i3].tx - templX, dty: bands[bestK+i3].ty - exp[i3]};
+        }
+      }
+      return out;
+    }
+    const tol = pitch*0.40;
+    for(let i3=0;i3<rowsN;i3++){
+      let best=null, bd=Infinity;
+      bands.forEach(b=>{ const d=Math.abs(b.ty-exp[i3]); if(d<bd){bd=d;best=b;} });
+      if(best && bd < tol) out[i3] = {dtx: best.tx - templX, dty: best.ty - exp[i3]};
+    }
+    return out;
+  }
+
+  const stripOff = TIM.xs.map(tx => stripOffsets(tx));   // [chiziq][qator]
+
+  /* Chiziq qatorlarning yarmidan kamini topgan bo'lsa — ishonchsiz, umuman ishlatilmaydi
+     (bitta tasodifiy topilgan belgi butun qatorni buzib qo'yishi mumkin). */
+  stripOff.forEach(col=>{
+    const found = col.filter(Boolean).length;
+    if(found < Math.max(3, Math.ceil(rowsN*0.6))) col.fill(null);
+  });
+
+  /* O'lchovlarni silliqlaymiz: qo'shni qatorlar siljishi keskin farq qilmasligi kerak
+     (shovqin va xiralikdan kelib chiqadigan tasodifiy xatolarni yo'qotadi). */
+  stripOff.forEach(col=>{
+    const raw = col.map(o => o ? {dtx:o.dtx, dty:o.dty} : null);
+    for(let i2=0;i2<raw.length;i2++){
+      if(!raw[i2]) continue;
+      const win = [];
+      for(let d=-1; d<=1; d++){ const o = raw[i2+d]; if(o) win.push(o); }
+      const med = k => { const a = win.map(o=>o[k]).sort((x,y)=>x-y); return a[Math.floor(a.length/2)]; };
+      let dtx = med('dtx'), dty = med('dty');
+      if(Math.abs(dty) < state.layout.rowHeight*0.08) dty = 0;   // juda kichik siljish — shovqin
+      if(Math.abs(dtx) < 1.2) dtx = 0;
+      col[i2] = {dtx, dty};
+    }
+  });
+  let fixedRows = 0;
+  for(let row=0; row<rowsN; row++){
+    if(stripOff.some(col => col[row])) fixedRows++;
+  }
+
+  /* Bubble x koordinatasiga qarab eng yaqin ikki chiziq orasida chiziqli
+     interpolatsiya — qog'oz o'rtasidan bukilgan bo'lsa ham to'g'ri chiqadi. */
+  /* Catmull-Rom: o'lchangan nuqtalardan silliq egri o'tkaziladi —
+     qog'oz bukilishi to'g'ri chiziq emas, egri bo'lgani uchun. */
+  function smoothAt(pts, x, key){
+    const n = pts.length;
+    if(n === 1) return pts[0].o[key];
+    if(x <= pts[0].x) return pts[0].o[key];
+    if(x >= pts[n-1].x) return pts[n-1].o[key];
+    let i = 0;
+    while(i < n-2 && x > pts[i+1].x) i++;
+    const p1 = pts[i], p2 = pts[i+1];
+    const p0 = pts[i-1] || p1, p3 = pts[i+2] || p2;
+    const t = (x - p1.x) / (p2.x - p1.x);
+    const v0 = p0.o[key], v1 = p1.o[key], v2 = p2.o[key], v3 = p3.o[key];
+    const t2 = t*t, t3 = t2*t;
+    return 0.5*((2*v1) + (-v0 + v2)*t + (2*v0 - 5*v1 + 4*v2 - v3)*t2 + (-v0 + 3*v1 - 3*v2 + v3)*t3);
+  }
+  function rowOffset(row, templX){
+    const pts = [];
+    TIM.xs.forEach((tx,i)=>{ const o = stripOff[i][row]; if(o) pts.push({x:tx, o}); });
+    if(!pts.length) return {dtx:0, dty:0};
+    if(pts.length === 1) return pts[0].o;
+    if(templX <= pts[0].x) return pts[0].o;
+    if(templX >= pts[pts.length-1].x) return pts[pts.length-1].o;
+    for(let i=0;i<pts.length-1;i++){
+      const a = pts[i], b = pts[i+1];
+      if(templX >= a.x && templX <= b.x){
+        const t = (templX - a.x) / (b.x - a.x);
+        return {dtx: a.o.dtx + (b.o.dtx - a.o.dtx)*t, dty: a.o.dty + (b.o.dty - a.o.dty)*t};
+      }
+    }
+    return pts[pts.length-1].o;
+  }
+
   const results = [];
   state.layout.items.forEach(it=>{
     const dark = {};
+    const off = rowOffset(it.row, it.colX + 45);
     // sample two nested radii per bubble (inner core + wider ring) and take the darker,
     // this tolerates a few pixels of calibration misalignment
     for(const k in it.options){
       const o = it.options[k];
       const rIn = state.layout.radius*0.33;
       const rOut = state.layout.radius*0.52;
-      const lIn = sampleLum(o.cx,o.cy,rIn);
-      const lOut = sampleLum(o.cx,o.cy,rOut);
+      const lIn = sampleLum(o.cx,o.cy,rIn,off);
+      const lOut = sampleLum(o.cx,o.cy,rOut,off);
       dark[k] = Math.min(lIn, lOut);
     }
     results.push({q:it.q, col:it.col, row:it.row, dark});
@@ -1994,10 +2211,18 @@ document.getElementById('confirmAnalyzeBtn').addEventListener('click', async ()=
 
   state.detected = results;
   state.overrides = results.map(r=>r.choice);
+  state.rowMarksFound = fixedRows;
   renderVerify();
   document.getElementById('verifyCard').style.display='block';
   document.getElementById('verifyCard').scrollIntoView({behavior:'smooth'});
   applyDetectedIdentity();
+  const rowsTotal = state.layout.rows;
+  if(fixedRows < rowsTotal){
+    diag(`Qator belgilari: ${fixedRows}/${rowsTotal} topildi`);
+    if(fixedRows < rowsTotal*0.5){
+      toast(`Diqqat: qator belgilari ${fixedRows}/${rowsTotal} topildi — varaqni to'liq va yorug' suratga oling.`);
+    }
+  }
   const multi = results.filter(r=>r.choice==='?').length;
   const empty = results.filter(r=>r.choice===null).length;
   if(multi || empty){
@@ -2172,7 +2397,8 @@ document.getElementById('finalizeBtn').addEventListener('click', async ()=>{
   state.history.unshift({
     id: Date.now(), name, variant, ts: new Date().toISOString(),
     correct, total: state.count, percent, grade, answers: state.overrides.slice(),
-    subject: state.subjectName, test: state.testName, studentId: state.detectedId || ''
+    subject: state.subjectName, test: state.testName, studentId: state.detectedId || '',
+    key: key.slice()
   });
   state.sessionCount++;
   document.getElementById('sessionCounter').textContent = `Bugun tekshirildi: ${state.sessionCount} ta`;
@@ -2224,6 +2450,112 @@ function orderedHistory(){
   return list.map(h=>({h, rank: rankOf.get(h.id)}));
 }
 
+/* ---- bitta o'quvchining javoblari ---- */
+function answerDetail(h){
+  const key = (h.key && h.key.length) ? h.key : (state.keys[h.variant] || []);
+  const ans = h.answers || [];
+  const n = h.total || ans.length;
+  let ok=0, bad=0, empty=0, multi=0, cells='';
+  for(let i=0;i<n;i++){
+    const g = ans[i], k = key[i] || null;
+    let cls, txt;
+    if(g === '?'){ cls='ans-multi'; txt='2+'; multi++; }
+    else if(!g){ cls='ans-empty'; txt='—'; empty++; }
+    else if(k && g === k){ cls='ans-ok'; txt=g; ok++; }
+    else { cls='ans-bad'; txt = k ? `${g}→${k}` : g; bad++; }
+    cells += `<div class="ans-cell ${cls}"><span class="qn">${i+1}</span>${txt}</div>`;
+  }
+  return {cells, ok, bad, empty, multi, hasKey: key.length > 0};
+}
+
+function historyDetailHTML(h){
+  const d = answerDetail(h);
+  return `<div class="hist-detail">
+    <div style="font-size:0.88rem;margin-bottom:4px;"><b>${displayName(h)}</b> · Variant ${h.variant||'—'} · ${h.correct}/${h.total} (${h.percent}%) · ${h.grade}</div>
+    <div class="mono" style="font-size:0.78rem;color:var(--muted);">${d.ok} to'g'ri · ${d.bad} xato · ${d.empty} bo'sh · ${d.multi} bir nechta belgilangan</div>
+    ${d.hasKey ? '' : `<div style="color:var(--warn);font-size:0.8rem;margin-top:6px;">Bu natija uchun kalit topilmadi — faqat belgilangan javoblar ko'rsatilmoqda.</div>`}
+    <div class="ans-grid">${d.cells}</div>
+    <div class="legend">Yashil — to'g'ri · Qizil — xato (o'q bilan to'g'ri javob) · Kulrang — bo'sh · Sariq — bir nechta belgilangan</div>
+  </div>`;
+}
+
+/* ---- umumiy statistika ---- */
+function renderStats(){
+  const body = document.getElementById('statBody');
+  const sel = document.getElementById('statVariant');
+  const hist = state.history || [];
+  if(!hist.length){ sel.innerHTML=''; body.innerHTML = '<p class="sub">Hozircha natijalar yo\'q.</p>'; return; }
+
+  const vars = [...new Set(hist.map(h=>h.variant || '—'))].sort();
+  const prev = sel.value;
+  sel.innerHTML = vars.map(v=>`<option value="${escXml(v)}">Variant ${escXml(v)}</option>`).join('')
+                + '<option value="__all">Barcha variantlar</option>';
+  sel.value = vars.includes(prev) || prev === '__all' ? prev : vars[0];
+
+  const v = sel.value;
+  const list = hist.filter(h => v === '__all' ? true : (h.variant || '—') === v);
+  if(!list.length){ body.innerHTML = '<p class="sub">Bu variant bo\'yicha natija yo\'q.</p>'; return; }
+
+  const pcts = list.map(h=>h.percent).sort((a,b)=>a-b);
+  const avg = Math.round(pcts.reduce((a,b)=>a+b,0)/pcts.length);
+  const med = pcts[Math.floor(pcts.length/2)];
+  const grades = {};
+  list.forEach(h=>{ grades[h.grade] = (grades[h.grade]||0)+1; });
+
+  let html = `<div class="mono" style="font-size:0.85rem;margin-bottom:12px;">
+      ${list.length} ta natija · o'rtacha <b>${avg}%</b> · median ${med}% · eng yuqori ${pcts[pcts.length-1]}% · eng past ${pcts[0]}%
+    </div>`;
+
+  html += Object.entries(grades).map(([g,c])=>`
+    <div class="stat-row"><span style="width:96px;">${escXml(g)}</span>
+      <span class="stat-bar"><span style="width:${Math.round(c/list.length*100)}%"></span></span>
+      <span class="mono" style="width:64px;text-align:right;">${c} ta</span></div>`).join('');
+
+  /* savollar bo'yicha */
+  if(v !== '__all'){
+    const total = list[0].total || state.count;
+    const same = list.filter(h => (h.total||0) === total);
+    if(same.length){
+      const stat = [];
+      for(let i=0;i<total;i++){
+        let ok=0, blank=0, multi=0;
+        const wrong = {};
+        same.forEach(h=>{
+          const key = (h.key && h.key.length) ? h.key : (state.keys[h.variant] || []);
+          const g = (h.answers||[])[i], k = key[i] || null;
+          if(g === '?') multi++;
+          else if(!g) blank++;
+          else if(k && g === k) ok++;
+          else wrong[g] = (wrong[g]||0)+1;
+        });
+        const top = Object.entries(wrong).sort((a,b)=>b[1]-a[1])[0];
+        stat.push({q:i+1, pct: Math.round(ok/same.length*100), blank, multi, top});
+      }
+      html += `<div style="font-size:0.88rem;font-weight:600;margin:16px 0 4px;">Savollar bo'yicha to'g'ri javoblar (%)</div>`;
+      html += `<div class="ans-grid">` + stat.map(o=>{
+        const cls = o.pct >= 70 ? 'ans-ok' : (o.pct >= 40 ? 'ans-multi' : 'ans-bad');
+        return `<div class="ans-cell ${cls}"><span class="qn">${o.q}</span>${o.pct}%</div>`;
+      }).join('') + `</div>`;
+
+      const hard = stat.slice().sort((a,b)=>a.pct-b.pct).filter(o=>o.pct < 70).slice(0,5);
+      if(hard.length){
+        html += `<div style="font-size:0.88rem;font-weight:600;margin:16px 0 4px;">Eng qiyin savollar</div>`;
+        html += hard.map(o=>`<div class="stat-row"><span style="width:96px;">${o.q}-savol</span>
+            <span class="stat-bar"><span style="width:${o.pct}%"></span></span>
+            <span class="mono" style="width:150px;text-align:right;">${o.pct}%${o.top ? ` · ko'p tanlangan: ${o.top[0]}` : ''}</span></div>`).join('');
+      } else {
+        html += `<div style="color:var(--pass);font-size:0.85rem;margin-top:12px;">Barcha savollarda 70% dan yuqori natija.</div>`;
+      }
+    }
+  } else {
+    html += `<div class="legend" style="margin-top:12px;">Savollar bo'yicha tahlil uchun bitta variantni tanlang — variantlarda savollar tartibi har xil bo'lishi mumkin.</div>`;
+  }
+
+  body.innerHTML = html;
+}
+document.getElementById('statVariant').addEventListener('change', renderStats);
+
+let delTimer = null;
 function renderHistory(){
   const list = document.getElementById('historyList');
   const rows = orderedHistory();
@@ -2237,21 +2569,42 @@ function renderHistory(){
     const dateStr = d.toLocaleDateString('uz-UZ') + ' ' + d.toLocaleTimeString('uz-UZ',{hour:'2-digit',minute:'2-digit'});
     const medal = idx===0?'🥇 ':idx===1?'🥈 ':idx===2?'🥉 ':`${rank}. `;
     const subj = h.subject ? ` · ${h.subject}` : '';
-    return `<div class="history-item">
-      <div><div class="hname">${medal}${displayName(h)}</div><div class="hmeta">Variant ${h.variant||'—'}${subj} · ${dateStr}</div></div>
+    const open = state.openDetail === h.id;
+    return `<div class="history-item" data-open="${h.id}">
+      <div><div class="hname">${open ? '▾ ' : '▸ '}${medal}${displayName(h)}</div><div class="hmeta">Variant ${h.variant||'—'}${subj} · ${dateStr}</div></div>
       <div style="display:flex;align-items:center;">
         <span class="mono">${h.correct}/${h.total} · ${h.percent}%</span>
-        <button class="hdel" data-del="${h.id}" title="Bu natijani o'chirish">✕</button>
+        <button class="hdel${state.pendingDelete === h.id ? ' armed' : ''}" data-del="${h.id}" title="Bu natijani o'chirish">${state.pendingDelete === h.id ? "O'chirilsinmi?" : '✕'}</button>
       </div>
-    </div>`;
+    </div>` + (open ? historyDetailHTML(h) : '');
   }).join('');
+  list.querySelectorAll('.history-item[data-open]').forEach(el=>{
+    el.addEventListener('click', (ev)=>{
+      if(ev.target.closest('button[data-del]')) return;
+      const id = Number(el.dataset.open);
+      state.openDetail = (state.openDetail === id) ? null : id;
+      renderHistory();
+    });
+  });
   list.querySelectorAll('button[data-del]').forEach(b=>{
-    b.addEventListener('click', ()=>{
+    b.addEventListener('click', (ev)=>{
+      ev.stopPropagation();
       const id = Number(b.dataset.del);
+      if(state.pendingDelete !== id){          // birinchi bosish — faqat so'raydi
+        state.pendingDelete = id;
+        clearTimeout(delTimer);
+        delTimer = setTimeout(()=>{ state.pendingDelete = null; renderHistory(); }, 5000);
+        renderHistory();
+        toast("O'chirish uchun \"O'chirilsinmi?\" tugmasini yana bosing.");
+        return;
+      }
+      clearTimeout(delTimer);
+      state.pendingDelete = null;
+      const gone = state.history.find(h=>h.id===id);
       state.history = state.history.filter(h=>h.id!==id);
-      renderHistory(); renderBackupInfo();
+      renderHistory(); renderStats(); renderBackupInfo();
       storageSet('history', state.history);
-      toast("Natija o'chirildi.");
+      toast(`${gone ? displayName(gone) : 'Natija'} o'chirildi.`);
     });
   });
 }
@@ -2270,7 +2623,7 @@ document.getElementById('clearHistBtn').addEventListener('click', (e)=>{
   clearTimeout(clearTimer); clearArmed = false;
   btn.textContent = 'Tarixni tozalash';
   state.history = [];
-  renderHistory(); renderBackupInfo();
+  renderHistory(); renderStats(); renderBackupInfo();
   toast('Tarix tozalandi.');
   storageSet('history', state.history);
 });
