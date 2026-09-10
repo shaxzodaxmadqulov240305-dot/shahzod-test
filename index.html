@@ -1826,11 +1826,29 @@ document.getElementById('analyzeBtn').addEventListener('click', ()=>{
   updateCalibLockUI();
 
   redrawCalib();
+  /* Nuqtalar aynan tahlilda ishlatiladigan joyda chiziladi:
+     qator belgilari bo'yicha tuzatish + qolgan siljish hisobga olinadi. */
+  let previewOff = (row, templX)=>({dtx:0, dty:0});
+  try{
+    const RO = buildRowOffsets(previewH);
+    const res = estimateResidual(previewH, RO.fn);
+    previewOff = (row, templX)=>{
+      const o = RO.fn(row, templX);
+      return {dtx: o.dtx + res.dtx, dty: o.dty + res.dty};
+    };
+    const st = document.getElementById('autoStatus');
+    if(RO.fixedRows === state.layout.rows && !fix.changed && fix.confident){
+      st.textContent = `✅ Burchaklar va ${RO.fixedRows} ta qator belgisi topildi — joylashuv aniqlandi.`;
+      st.style.color = 'var(--pass)';
+    }
+  }catch(e){ console.warn('tuzatishni hisoblab bo\'lmadi', e); }
+
   calibCtx.fillStyle = 'rgba(213,68,46,0.85)';
   state.layout.items.forEach(it=>{
+    const off = previewOff(it.row, it.colX + 45);
     for(const k in it.options){
       const o = it.options[k];
-      const p = mapPoint(previewH, o.cx, o.cy);
+      const p = mapPoint(previewH, o.cx + off.dtx, o.cy + off.dty);
       const dx = p.x*state.naturalScale, dy = p.y*state.naturalScale;
       calibCtx.beginPath();
       calibCtx.arc(dx,dy,3,0,Math.PI*2);
@@ -1936,6 +1954,249 @@ function resolveOrientation(pts){
   const confident = best.score > 0.35 && (best.ref - best.mark) > 25;
   const changed = confident && !(best.k===0 && best.mir===0);
   return { pts: confident ? best.dst : pts, changed, confident, score: best.score, k: best.k, mir: best.mir };
+}
+
+/* =========================================================
+   QATOR BELGILARI — har bir qatorning haqiqiy joyini o'lchash
+   (ham ko'rish, ham tahlil bosqichida bir xil ishlatiladi)
+   ========================================================= */
+function buildRowOffsets(h){
+  const sctx = state.srcCanvas.getContext('2d');
+  /* ---- qator belgilarini topish: butun chekka bo'ylab bir marta skanerlanadi ----
+     Qog'oz bukilgan yoki nusxa kichraygan bo'lsa belgi kutilgan joydan ancha
+     siljigan bo'lishi mumkin, shuning uchun tor oyna emas, butun chiziq qidiriladi. */
+  const rowsN = state.layout.rows;
+  const bandCounts = [];
+  function stripOffsets(templX){
+    const pad = Math.max(20, state.layout.rowHeight*1.7);
+    const yTop = START_Y - pad;
+    /* Pastki chegara butun mumkin bo'lgan jadval maydonini qamraydi — shunda varaqda
+       sozlamadagidan ko'proq qator bo'lsa, buni sezib ogohlantira olamiz. */
+    const yBot = Math.max(START_Y + state.layout.rows*state.layout.rowHeight + pad, FOOT_Y - 26);
+    /* Butun chiziq bo'ylab piksellarni bir marta o'qib olamiz, lekin tahlilni
+       VARAQ koordinatalarida qilamiz — shunda varaq qiya yoki burilgan bo'lsa ham
+       oynaga begona narsa qo'shilmaydi. */
+    const corners = [mapPoint(h,templX-14,yTop), mapPoint(h,templX+14,yTop),
+                     mapPoint(h,templX+14,yBot), mapPoint(h,templX-14,yBot)];
+    let x0 = Math.max(0, Math.floor(Math.min(...corners.map(p=>p.x))) - 2);
+    let x1 = Math.min(state.srcCanvas.width,  Math.ceil(Math.max(...corners.map(p=>p.x))) + 2);
+    let y0 = Math.max(0, Math.floor(Math.min(...corners.map(p=>p.y))) - 2);
+    let y1 = Math.min(state.srcCanvas.height, Math.ceil(Math.max(...corners.map(p=>p.y))) + 2);
+    const bw = x1-x0, bh = y1-y0;
+    const out = new Array(rowsN).fill(null);
+    if(bw < 4 || bh < 20) return out;
+    let data;
+    try{ data = sctx.getImageData(x0, y0, bw, bh).data; }catch(e){ return out; }
+    const lum = new Float32Array(bw*bh);
+    for(let i2=0;i2<bw*bh;i2++){
+      lum[i2] = 0.299*data[i2*4]+0.587*data[i2*4+1]+0.114*data[i2*4+2];
+    }
+    const px = (ix, iy) => {
+      const a = Math.round(ix)-x0, b = Math.round(iy)-y0;
+      if(a<0||b<0||a>=bw||b>=bh) return 255;
+      return lum[b*bw+a];
+    };
+    const sampleT = (tx, ty) => { const p = mapPoint(h, tx, ty); return px(p.x, p.y); };
+
+    // 1) chiziq bo'ylab qorong'ilik profili (varaq koordinatalarida)
+    const step = 0.5;
+    const prof = [], ys = [];
+    for(let ty = yTop; ty <= yBot; ty += step){
+      let sum = 0, n = 0;
+      for(let dx = -6; dx <= 6; dx += 3){ sum += sampleT(templX+dx, ty); n++; }
+      prof.push(sum/n); ys.push(ty);
+    }
+    const sorted = prof.slice().sort((a,b)=>a-b);
+    const paper = sorted[Math.floor(sorted.length*0.7)] || 230;
+    const thr = paper*0.62;
+
+    // 2) bandlarni ajratish
+    const bands = [];
+    let k2 = 0;
+    while(k2 < prof.length){
+      if(prof[k2] < thr){
+        let s2 = k2, wsum = 0, wy = 0;
+        while(k2 < prof.length && prof[k2] < thr){
+          const g = thr - prof[k2];
+          wsum += g; wy += ys[k2]*g; k2++;
+        }
+        const heightT = (k2 - s2)*step;
+        if(wsum > 0 && heightT >= 1.5 && heightT <= state.layout.rowHeight*0.55){
+          bands.push({ty: wy/wsum, h: heightT});
+        }
+      } else k2++;
+    }
+    if(!bands.length) return out;
+    bandCounts.push(bands.length);
+
+    // 3) har bir band uchun x-markazini ham o'lchaymiz
+    bands.forEach(b=>{
+      let wsum = 0, wx = 0, darkN = 0;
+      for(let dx = -13; dx <= 13; dx += 0.5){
+        const v = sampleT(templX+dx, b.ty);
+        if(v < thr){ const g = thr - v; wsum += g; wx += (templX+dx)*g; darkN++; }
+      }
+      b.tx = wsum > 0 ? wx/wsum : templX;
+      b.wid = darkN*0.5;          // qora qismning kengligi (varaq birligida)
+    });
+    /* Jadval chizig'i belgidan ancha keng bo'ladi — uni chiqarib tashlaymiz */
+    for(let i4=bands.length-1; i4>=0; i4--){
+      if(bands[i4].wid > TIM.w*1.45 || bands[i4].wid < TIM.w*0.35) bands.splice(i4,1);
+    }
+    if(!bands.length) return out;
+    bandCounts[bandCounts.length-1] = bands.length;
+
+    // 4) qatorlarga moslashtirish — oraliq mos kelishi shart
+    const pitch = state.layout.rowHeight;
+    const exp = [];
+    for(let row=0; row<rowsN; row++) exp.push(START_Y + row*pitch + pitch/2);
+
+    if(bands.length >= rowsN){
+      let bestK = 0, bestErr = Infinity;
+      for(let k3=0; k3 + rowsN <= bands.length; k3++){
+        let err = 0;
+        for(let i3=1;i3<rowsN;i3++){
+          const d = (bands[k3+i3].ty - bands[k3].ty) - (exp[i3] - exp[0]);
+          err += d*d;
+        }
+        const shift = bands[k3].ty - exp[0];
+        err += shift*shift*0.05;
+        if(err < bestErr){ bestErr = err; bestK = k3; }
+      }
+      if(Math.sqrt(bestErr/rowsN) < pitch*0.5){
+        for(let i3=0;i3<rowsN;i3++){
+          out[i3] = {dtx: bands[bestK+i3].tx - templX, dty: bands[bestK+i3].ty - exp[i3]};
+        }
+      }
+      return out;
+    }
+    const tol = pitch*0.40;
+    for(let i3=0;i3<rowsN;i3++){
+      let best=null, bd=Infinity;
+      bands.forEach(b=>{ const d=Math.abs(b.ty-exp[i3]); if(d<bd){bd=d;best=b;} });
+      if(best && bd < tol) out[i3] = {dtx: best.tx - templX, dty: best.ty - exp[i3]};
+    }
+    return out;
+  }
+
+  const stripOff = TIM.xs.map(tx => stripOffsets(tx));   // [chiziq][qator]
+
+  /* Chiziq qatorlarning yarmidan kamini topgan bo'lsa — ishonchsiz, umuman ishlatilmaydi
+     (bitta tasodifiy topilgan belgi butun qatorni buzib qo'yishi mumkin). */
+  stripOff.forEach(col=>{
+    const found = col.filter(Boolean).length;
+    if(found < Math.max(3, Math.ceil(rowsN*0.6))) col.fill(null);
+  });
+
+  /* O'lchovlarni silliqlaymiz: qo'shni qatorlar siljishi keskin farq qilmasligi kerak
+     (shovqin va xiralikdan kelib chiqadigan tasodifiy xatolarni yo'qotadi). */
+  stripOff.forEach(col=>{
+    const raw = col.map(o => o ? {dtx:o.dtx, dty:o.dty} : null);
+    for(let i2=0;i2<raw.length;i2++){
+      if(!raw[i2]) continue;
+      const win = [];
+      for(let d=-1; d<=1; d++){ const o = raw[i2+d]; if(o) win.push(o); }
+      const med = k => { const a = win.map(o=>o[k]).sort((x,y)=>x-y); return a[Math.floor(a.length/2)]; };
+      let dtx = med('dtx'), dty = med('dty');
+      if(Math.abs(dty) < state.layout.rowHeight*0.08) dty = 0;   // juda kichik siljish — shovqin
+      if(Math.abs(dtx) < 1.2) dtx = 0;
+      col[i2] = {dtx, dty};
+    }
+  });
+  let fixedRows = 0;
+  for(let row=0; row<rowsN; row++){
+    if(stripOff.some(col => col[row])) fixedRows++;
+  }
+
+  /* Bubble x koordinatasiga qarab eng yaqin ikki chiziq orasida chiziqli
+     interpolatsiya — qog'oz o'rtasidan bukilgan bo'lsa ham to'g'ri chiqadi. */
+  /* Catmull-Rom: o'lchangan nuqtalardan silliq egri o'tkaziladi —
+     qog'oz bukilishi to'g'ri chiziq emas, egri bo'lgani uchun. */
+  function smoothAt(pts, x, key){
+    const n = pts.length;
+    if(n === 1) return pts[0].o[key];
+    if(x <= pts[0].x) return pts[0].o[key];
+    if(x >= pts[n-1].x) return pts[n-1].o[key];
+    let i = 0;
+    while(i < n-2 && x > pts[i+1].x) i++;
+    const p1 = pts[i], p2 = pts[i+1];
+    const p0 = pts[i-1] || p1, p3 = pts[i+2] || p2;
+    const t = (x - p1.x) / (p2.x - p1.x);
+    const v0 = p0.o[key], v1 = p1.o[key], v2 = p2.o[key], v3 = p3.o[key];
+    const t2 = t*t, t3 = t2*t;
+    return 0.5*((2*v1) + (-v0 + v2)*t + (2*v0 - 5*v1 + 4*v2 - v3)*t2 + (-v0 + 3*v1 - 3*v2 + v3)*t3);
+  }
+  function rowOffset(row, templX){
+    const pts = [];
+    TIM.xs.forEach((tx,i)=>{ const o = stripOff[i][row]; if(o) pts.push({x:tx, o}); });
+    if(!pts.length) return {dtx:0, dty:0};
+    if(pts.length === 1) return pts[0].o;
+    if(templX <= pts[0].x) return pts[0].o;
+    if(templX >= pts[pts.length-1].x) return pts[pts.length-1].o;
+    for(let i=0;i<pts.length-1;i++){
+      const a = pts[i], b = pts[i+1];
+      if(templX >= a.x && templX <= b.x){
+        const t = (templX - a.x) / (b.x - a.x);
+        return {dtx: a.o.dtx + (b.o.dtx - a.o.dtx)*t, dty: a.o.dty + (b.o.dty - a.o.dty)*t};
+      }
+    }
+    return pts[pts.length-1].o;
+  }
+
+
+  return { fn: rowOffset, fixedRows, bandCounts };
+}
+
+/* Bosilgan halqalarning o'zidan qolgan kichik siljishni o'lchaymiz.
+   Burchak belgilari bir necha piksel xato topilsa yoki chop etishda varaq
+   biroz surilsa, butun to'r shuncha siljiydi — buni halqalar aytib beradi. */
+function estimateResidual(h, rowOffFn){
+  const L = state.layout;
+  const R = L.radius;
+  const win = Math.min(R*1.25, (getOptSpacing()/2) - 1.5);
+  const picks = [];
+  const letters = getOptLetters();
+  const step = Math.max(1, Math.floor(L.items.length/18));
+  for(let i=0;i<L.items.length;i+=step){
+    const it = L.items[i];
+    picks.push({it, k: letters[i % letters.length]});
+  }
+  const dxs = [], dys = [];
+  picks.forEach(({it,k})=>{
+    const o = it.options[k];
+    const off = rowOffFn(it.row, it.colX + 45);
+    const cx = o.cx + off.dtx, cy = o.cy + off.dty;
+    const rd = boxReader(h, cx-win, cy-win, cx+win, cy+win);
+    if(!rd) return;
+    let sum = 0, n = 0;
+    const vals = [];
+    for(let dy=-win; dy<=win; dy+=1){
+      for(let dx=-win; dx<=win; dx+=1){
+        if(dx*dx+dy*dy > win*win) continue;
+        const v = rd(cx+dx, cy+dy);
+        vals.push({dx, dy, v}); sum += v; n++;
+      }
+    }
+    if(n < 20) return;
+    const sorted = vals.map(o2=>o2.v).sort((a,b)=>a-b);
+    const paper = sorted[Math.floor(sorted.length*0.75)];
+    const ink = sorted[Math.floor(sorted.length*0.05)];
+    if(paper - ink < 25) return;                 // bu yerda siyoh yo'q — o'lchab bo'lmaydi
+    const thr = paper - (paper-ink)*0.45;
+    let wsum = 0, wx = 0, wy = 0;
+    vals.forEach(o2=>{ if(o2.v < thr){ const g = thr-o2.v; wsum += g; wx += o2.dx*g; wy += o2.dy*g; } });
+    if(wsum <= 0) return;
+    dxs.push(wx/wsum); dys.push(wy/wsum);
+  });
+  if(dxs.length < 5) return {dtx:0, dty:0, n:0};
+  const med = a => { const b=a.slice().sort((x,y)=>x-y); return b[Math.floor(b.length/2)]; };
+  let dtx = med(dxs), dty = med(dys);
+  const cap = R*0.6;
+  dtx = Math.max(-cap, Math.min(cap, dtx));
+  dty = Math.max(-cap, Math.min(cap, dty));
+  if(Math.abs(dtx) < 0.6) dtx = 0;
+  if(Math.abs(dty) < 0.6) dty = 0;
+  return {dtx, dty, n: dxs.length};
 }
 
 /* =========================================================
@@ -2141,185 +2402,17 @@ document.getElementById('confirmAnalyzeBtn').addEventListener('click', async ()=
     }catch(e){ return 255; }
   }
 
-  /* ---- qator belgilarini topish: butun chekka bo'ylab bir marta skanerlanadi ----
-     Qog'oz bukilgan yoki nusxa kichraygan bo'lsa belgi kutilgan joydan ancha
-     siljigan bo'lishi mumkin, shuning uchun tor oyna emas, butun chiziq qidiriladi. */
+  const RO = buildRowOffsets(h);
+  const fixedRows = RO.fixedRows;
+  const bandCounts = RO.bandCounts;
   const rowsN = state.layout.rows;
-  const bandCounts = [];
-  function stripOffsets(templX){
-    const pad = Math.max(20, state.layout.rowHeight*1.7);
-    const yTop = START_Y - pad;
-    /* Pastki chegara butun mumkin bo'lgan jadval maydonini qamraydi — shunda varaqda
-       sozlamadagidan ko'proq qator bo'lsa, buni sezib ogohlantira olamiz. */
-    const yBot = Math.max(START_Y + state.layout.rows*state.layout.rowHeight + pad, FOOT_Y - 26);
-    /* Butun chiziq bo'ylab piksellarni bir marta o'qib olamiz, lekin tahlilni
-       VARAQ koordinatalarida qilamiz — shunda varaq qiya yoki burilgan bo'lsa ham
-       oynaga begona narsa qo'shilmaydi. */
-    const corners = [mapPoint(h,templX-14,yTop), mapPoint(h,templX+14,yTop),
-                     mapPoint(h,templX+14,yBot), mapPoint(h,templX-14,yBot)];
-    let x0 = Math.max(0, Math.floor(Math.min(...corners.map(p=>p.x))) - 2);
-    let x1 = Math.min(state.srcCanvas.width,  Math.ceil(Math.max(...corners.map(p=>p.x))) + 2);
-    let y0 = Math.max(0, Math.floor(Math.min(...corners.map(p=>p.y))) - 2);
-    let y1 = Math.min(state.srcCanvas.height, Math.ceil(Math.max(...corners.map(p=>p.y))) + 2);
-    const bw = x1-x0, bh = y1-y0;
-    const out = new Array(rowsN).fill(null);
-    if(bw < 4 || bh < 20) return out;
-    let data;
-    try{ data = sctx.getImageData(x0, y0, bw, bh).data; }catch(e){ return out; }
-    const lum = new Float32Array(bw*bh);
-    for(let i2=0;i2<bw*bh;i2++){
-      lum[i2] = 0.299*data[i2*4]+0.587*data[i2*4+1]+0.114*data[i2*4+2];
-    }
-    const px = (ix, iy) => {
-      const a = Math.round(ix)-x0, b = Math.round(iy)-y0;
-      if(a<0||b<0||a>=bw||b>=bh) return 255;
-      return lum[b*bw+a];
-    };
-    const sampleT = (tx, ty) => { const p = mapPoint(h, tx, ty); return px(p.x, p.y); };
-
-    // 1) chiziq bo'ylab qorong'ilik profili (varaq koordinatalarida)
-    const step = 0.5;
-    const prof = [], ys = [];
-    for(let ty = yTop; ty <= yBot; ty += step){
-      let sum = 0, n = 0;
-      for(let dx = -6; dx <= 6; dx += 3){ sum += sampleT(templX+dx, ty); n++; }
-      prof.push(sum/n); ys.push(ty);
-    }
-    const sorted = prof.slice().sort((a,b)=>a-b);
-    const paper = sorted[Math.floor(sorted.length*0.7)] || 230;
-    const thr = paper*0.62;
-
-    // 2) bandlarni ajratish
-    const bands = [];
-    let k2 = 0;
-    while(k2 < prof.length){
-      if(prof[k2] < thr){
-        let s2 = k2, wsum = 0, wy = 0;
-        while(k2 < prof.length && prof[k2] < thr){
-          const g = thr - prof[k2];
-          wsum += g; wy += ys[k2]*g; k2++;
-        }
-        const heightT = (k2 - s2)*step;
-        if(wsum > 0 && heightT >= 1.5 && heightT <= state.layout.rowHeight*0.55){
-          bands.push({ty: wy/wsum, h: heightT});
-        }
-      } else k2++;
-    }
-    if(!bands.length) return out;
-    bandCounts.push(bands.length);
-
-    // 3) har bir band uchun x-markazini ham o'lchaymiz
-    bands.forEach(b=>{
-      let wsum = 0, wx = 0, darkN = 0;
-      for(let dx = -13; dx <= 13; dx += 0.5){
-        const v = sampleT(templX+dx, b.ty);
-        if(v < thr){ const g = thr - v; wsum += g; wx += (templX+dx)*g; darkN++; }
-      }
-      b.tx = wsum > 0 ? wx/wsum : templX;
-      b.wid = darkN*0.5;          // qora qismning kengligi (varaq birligida)
-    });
-    /* Jadval chizig'i belgidan ancha keng bo'ladi — uni chiqarib tashlaymiz */
-    for(let i4=bands.length-1; i4>=0; i4--){
-      if(bands[i4].wid > TIM.w*1.45 || bands[i4].wid < TIM.w*0.35) bands.splice(i4,1);
-    }
-    if(!bands.length) return out;
-    bandCounts[bandCounts.length-1] = bands.length;
-
-    // 4) qatorlarga moslashtirish — oraliq mos kelishi shart
-    const pitch = state.layout.rowHeight;
-    const exp = [];
-    for(let row=0; row<rowsN; row++) exp.push(START_Y + row*pitch + pitch/2);
-
-    if(bands.length >= rowsN){
-      let bestK = 0, bestErr = Infinity;
-      for(let k3=0; k3 + rowsN <= bands.length; k3++){
-        let err = 0;
-        for(let i3=1;i3<rowsN;i3++){
-          const d = (bands[k3+i3].ty - bands[k3].ty) - (exp[i3] - exp[0]);
-          err += d*d;
-        }
-        const shift = bands[k3].ty - exp[0];
-        err += shift*shift*0.05;
-        if(err < bestErr){ bestErr = err; bestK = k3; }
-      }
-      if(Math.sqrt(bestErr/rowsN) < pitch*0.5){
-        for(let i3=0;i3<rowsN;i3++){
-          out[i3] = {dtx: bands[bestK+i3].tx - templX, dty: bands[bestK+i3].ty - exp[i3]};
-        }
-      }
-      return out;
-    }
-    const tol = pitch*0.40;
-    for(let i3=0;i3<rowsN;i3++){
-      let best=null, bd=Infinity;
-      bands.forEach(b=>{ const d=Math.abs(b.ty-exp[i3]); if(d<bd){bd=d;best=b;} });
-      if(best && bd < tol) out[i3] = {dtx: best.tx - templX, dty: best.ty - exp[i3]};
-    }
-    return out;
-  }
-
-  const stripOff = TIM.xs.map(tx => stripOffsets(tx));   // [chiziq][qator]
-
-  /* Chiziq qatorlarning yarmidan kamini topgan bo'lsa — ishonchsiz, umuman ishlatilmaydi
-     (bitta tasodifiy topilgan belgi butun qatorni buzib qo'yishi mumkin). */
-  stripOff.forEach(col=>{
-    const found = col.filter(Boolean).length;
-    if(found < Math.max(3, Math.ceil(rowsN*0.6))) col.fill(null);
-  });
-
-  /* O'lchovlarni silliqlaymiz: qo'shni qatorlar siljishi keskin farq qilmasligi kerak
-     (shovqin va xiralikdan kelib chiqadigan tasodifiy xatolarni yo'qotadi). */
-  stripOff.forEach(col=>{
-    const raw = col.map(o => o ? {dtx:o.dtx, dty:o.dty} : null);
-    for(let i2=0;i2<raw.length;i2++){
-      if(!raw[i2]) continue;
-      const win = [];
-      for(let d=-1; d<=1; d++){ const o = raw[i2+d]; if(o) win.push(o); }
-      const med = k => { const a = win.map(o=>o[k]).sort((x,y)=>x-y); return a[Math.floor(a.length/2)]; };
-      let dtx = med('dtx'), dty = med('dty');
-      if(Math.abs(dty) < state.layout.rowHeight*0.08) dty = 0;   // juda kichik siljish — shovqin
-      if(Math.abs(dtx) < 1.2) dtx = 0;
-      col[i2] = {dtx, dty};
-    }
-  });
-  let fixedRows = 0;
-  for(let row=0; row<rowsN; row++){
-    if(stripOff.some(col => col[row])) fixedRows++;
-  }
-
-  /* Bubble x koordinatasiga qarab eng yaqin ikki chiziq orasida chiziqli
-     interpolatsiya — qog'oz o'rtasidan bukilgan bo'lsa ham to'g'ri chiqadi. */
-  /* Catmull-Rom: o'lchangan nuqtalardan silliq egri o'tkaziladi —
-     qog'oz bukilishi to'g'ri chiziq emas, egri bo'lgani uchun. */
-  function smoothAt(pts, x, key){
-    const n = pts.length;
-    if(n === 1) return pts[0].o[key];
-    if(x <= pts[0].x) return pts[0].o[key];
-    if(x >= pts[n-1].x) return pts[n-1].o[key];
-    let i = 0;
-    while(i < n-2 && x > pts[i+1].x) i++;
-    const p1 = pts[i], p2 = pts[i+1];
-    const p0 = pts[i-1] || p1, p3 = pts[i+2] || p2;
-    const t = (x - p1.x) / (p2.x - p1.x);
-    const v0 = p0.o[key], v1 = p1.o[key], v2 = p2.o[key], v3 = p3.o[key];
-    const t2 = t*t, t3 = t2*t;
-    return 0.5*((2*v1) + (-v0 + v2)*t + (2*v0 - 5*v1 + 4*v2 - v3)*t2 + (-v0 + 3*v1 - 3*v2 + v3)*t3);
-  }
-  function rowOffset(row, templX){
-    const pts = [];
-    TIM.xs.forEach((tx,i)=>{ const o = stripOff[i][row]; if(o) pts.push({x:tx, o}); });
-    if(!pts.length) return {dtx:0, dty:0};
-    if(pts.length === 1) return pts[0].o;
-    if(templX <= pts[0].x) return pts[0].o;
-    if(templX >= pts[pts.length-1].x) return pts[pts.length-1].o;
-    for(let i=0;i<pts.length-1;i++){
-      const a = pts[i], b = pts[i+1];
-      if(templX >= a.x && templX <= b.x){
-        const t = (templX - a.x) / (b.x - a.x);
-        return {dtx: a.o.dtx + (b.o.dtx - a.o.dtx)*t, dty: a.o.dty + (b.o.dty - a.o.dty)*t};
-      }
-    }
-    return pts[pts.length-1].o;
+  const res = estimateResidual(h, RO.fn);
+  const rowOffset = (row, templX)=>{
+    const o = RO.fn(row, templX);
+    return {dtx: o.dtx + res.dtx, dty: o.dty + res.dty};
+  };
+  if(res.n && (res.dtx || res.dty)){
+    diag(`Qolgan siljish tuzatildi: x ${res.dtx.toFixed(1)}, y ${res.dty.toFixed(1)} (${res.n} ta dumaloq bo'yicha)`);
   }
 
   const results = [];
