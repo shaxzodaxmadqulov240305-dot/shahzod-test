@@ -85,7 +85,7 @@ select:focus,input:focus{outline:2px solid var(--stamp);outline-offset:1px;}
 .btn-sm{padding:6px 11px;font-size:0.78rem;}
 
 /* ---- sheet preview ---- */
-.sheet-shell{background:var(--paper-100);border-radius:6px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.4);max-width:520px;margin:0 auto;}
+.sheet-shell{background:#FFFFFF;border-radius:6px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.4);max-width:520px;margin:0 auto;}
 .sheet-shell svg{display:block;width:100%;height:auto;}
 
 /* ---- answer key grid ---- */
@@ -382,7 +382,13 @@ textarea{width:100%;min-height:130px;background:var(--ink-850);border:1px solid 
         <button class="btn btn-ghost btn-sm" id="retakeBtn">🔄 Qayta olish</button>
         <button class="btn btn-primary" id="analyzeBtn" disabled>👁️ Joylashuvni ko'rish</button>
       </div>
-      <p class="calib-hint" id="alignHint" style="display:none;">Pastdagi qizil nuqtalar dumaloqlar ustiga to'g'ri tushganini tekshiring. Agar nuqtalar dumaloqlardan siljigan bo'lsa — "Qayta belgilash"ni bosib, mos nuqtani rasm ustida qaytadan bosing.</p>
+      <div class="warn-box" id="geomWarn" style="display:none;margin-top:14px;">
+        <div id="geomWarnText" style="margin-bottom:10px;"></div>
+        <button class="btn btn-primary btn-sm" id="geomFixBtn" style="display:none;">Sozlamani varaqqa moslashtirish</button>
+      </div>
+      <p class="calib-hint" id="alignHint" style="display:none;">Qizil nuqtalar dumaloqlarning <b>markaziga</b> tushganini tekshiring.<br>
+      Nuqtalar bir tomonga siljib borsa yoki oxirgi ustunga yetmasa — bu burchak xatosi emas: 1-bosqichdagi <b>savollar soni</b> yoki <b>variantlar soni</b> varaqdagidan boshqacha. Avval o'shani to'g'rilang.<br>
+      Nuqtalar butunlay boshqa joyda bo'lsa — "Qayta belgilash"ni bosib, burchaklarni qo'lda ko'rsating.</p>
       <div class="row" style="justify-content:center;margin-top:10px;" id="alignActions">
         <button class="btn btn-ghost btn-sm" id="realignBtn" style="display:none;">🎯 Qayta belgilash</button>
         <button class="btn btn-primary" id="confirmAnalyzeBtn" style="display:none;">🔍 Tahlil qilish</button>
@@ -402,6 +408,7 @@ textarea{width:100%;min-height:130px;background:var(--ink-850);border:1px solid 
           Faqat e'tibor talab qiladiganlarini ko'rsatish
         </label>
       </div>
+      <div class="warn-box" id="mismatchWarn" style="display:none;"></div>
       <p id="keyStatus" style="font-size:0.82rem;margin:0 0 10px;line-height:1.45;"></p>
       <p id="idStatus" style="font-size:0.85rem;color:var(--paper-300);margin:0 0 8px;line-height:1.5;"></p>
       <p class="mono" id="verifySummary" style="font-size:0.82rem;color:var(--muted);margin:0 0 10px;"></p>
@@ -752,8 +759,8 @@ function buildSheetSVG(layout){
   const r = layout.radius;
   const optLetters = getOptLetters();
   let s = `<svg viewBox="0 0 ${PAGE_W} ${PAGE_H}" xmlns="http://www.w3.org/2000/svg" font-family="IBM Plex Sans, sans-serif">`;
-  s += `<rect x="0" y="0" width="${PAGE_W}" height="${PAGE_H}" fill="#F3F0E7"/>`;
-  s += `<rect x="40" y="40" width="920" height="1334" fill="none" stroke="#C9C3B2" stroke-width="1.5"/>`;
+  s += `<rect x="0" y="0" width="${PAGE_W}" height="${PAGE_H}" fill="#FFFFFF"/>`;
+  s += `<rect x="40" y="40" width="920" height="1334" fill="none" stroke="#BDBDBD" stroke-width="1.5"/>`;
   for(const k in CORNER){
     const c = CORNER[k];
     s += `<rect x="${c.x-20}" y="${c.y-20}" width="40" height="40" fill="#161616"/>`;
@@ -1786,6 +1793,8 @@ document.getElementById('retakeBtn').addEventListener('click', ()=>{
 let previewH = null;
 function exitAlignPreview(){
   previewH = null;
+  const gw = document.getElementById('geomWarn');
+  if(gw) gw.style.display = 'none';
   document.getElementById('alignHint').style.display='none';
   document.getElementById('realignBtn').style.display='none';
   document.getElementById('confirmAnalyzeBtn').style.display='none';
@@ -1828,6 +1837,8 @@ document.getElementById('analyzeBtn').addEventListener('click', ()=>{
       calibCtx.fill();
     }
   });
+
+  checkSheetGeometry(previewH);
 
   document.getElementById('analyzeBtn').style.display='none';
   document.getElementById('alignHint').style.display='block';
@@ -1928,6 +1939,174 @@ function resolveOrientation(pts){
 }
 
 /* =========================================================
+   VARAQ GEOMETRIYASINI TEKSHIRISH
+   Suratdagi varaqda nechta qator, nechta variant va nechta ustun borligini
+   o'lchab, ilovadagi sozlama bilan solishtiramiz. Mos kelmasa — ogohlantiramiz.
+   ========================================================= */
+function boxReader(h, tx0, ty0, tx1, ty1){
+  const cs = [mapPoint(h,tx0,ty0), mapPoint(h,tx1,ty0), mapPoint(h,tx1,ty1), mapPoint(h,tx0,ty1)];
+  let x0 = Math.max(0, Math.floor(Math.min(...cs.map(p=>p.x))) - 2);
+  let x1 = Math.min(state.srcCanvas.width,  Math.ceil(Math.max(...cs.map(p=>p.x))) + 2);
+  let y0 = Math.max(0, Math.floor(Math.min(...cs.map(p=>p.y))) - 2);
+  let y1 = Math.min(state.srcCanvas.height, Math.ceil(Math.max(...cs.map(p=>p.y))) + 2);
+  const w = x1-x0, hh = y1-y0;
+  if(w < 3 || hh < 3) return null;
+  let data;
+  try{ data = state.srcCanvas.getContext('2d').getImageData(x0, y0, w, hh).data; }catch(e){ return null; }
+  const lum = new Float32Array(w*hh);
+  for(let i=0;i<w*hh;i++) lum[i] = 0.299*data[i*4]+0.587*data[i*4+1]+0.114*data[i*4+2];
+  return (tx, ty) => {
+    const p = mapPoint(h, tx, ty);
+    const a = Math.round(p.x)-x0, b = Math.round(p.y)-y0;
+    if(a<0||b<0||a>=w||b>=hh) return 255;
+    return lum[b*w+a];
+  };
+}
+
+function clustersAlong(sample, from, to, step, cross, crossStep){
+  const prof = [], xs = [];
+  for(let t = from; t <= to; t += step){
+    let sum = 0, n = 0;
+    for(let d = -cross; d <= cross; d += crossStep){ sum += sample(t, d); n++; }
+    prof.push(sum/n); xs.push(t);
+  }
+  if(!prof.length) return [];
+  const sorted = prof.slice().sort((a,b)=>a-b);
+  const paper = sorted[Math.floor(sorted.length*0.75)] || 230;
+  const thr = paper*0.65;
+  const out = [];
+  let i = 0;
+  while(i < prof.length){
+    if(prof[i] < thr){
+      let wsum = 0, wt = 0, cnt = 0;
+      while(i < prof.length && prof[i] < thr){
+        const g = thr - prof[i];
+        wsum += g; wt += xs[i]*g; cnt++; i++;
+      }
+      if(wsum > 0 && cnt*step >= 1.5) out.push({t: wt/wsum, width: cnt*step});
+    } else i++;
+  }
+  return out;
+}
+
+function median(a){
+  if(!a.length) return 0;
+  const b = a.slice().sort((x,y)=>x-y);
+  return b[Math.floor(b.length/2)];
+}
+
+function measureSheet(h){
+  /* Bu tekshiruv faqat surat yetarlicha aniq bo'lgandagina ishlaydi.
+     Ishonch bo'lmasa — null qaytaramiz va hech narsa aytmaymiz:
+     yolg'on ogohlantirish xatoning o'zidan ko'ra yomonroq. */
+  const pA = mapPoint(h,60,60), pB = mapPoint(h,940,60), pC = mapPoint(h,60,1354);
+  const wpx = Math.hypot(pB.x-pA.x, pB.y-pA.y);
+  const hpx = Math.hypot(pC.x-pA.x, pC.y-pA.y);
+  if(Math.min(wpx, hpx) < 780) return null;      // varaq suratda kichik — o'lchab bo'lmaydi
+
+  /* ---- qatorlar soni: ikkita chekka chiziq bir xil natija bersagina qabul qilinadi ---- */
+  const yTop = START_Y - 40, yBot = PAGE_H - FOOTER_RESERVE + 20;
+  const counts = [], centersList = [];
+  [TIM.xs[0], TIM.xs[1]].forEach(tx=>{
+    const rd = boxReader(h, tx-20, yTop, tx+20, yBot);
+    if(!rd) return;
+    const cl = clustersAlong((ty,dx)=>rd(tx+dx, ty), yTop, yBot, 0.5, 6, 3)
+      .filter(c => c.width >= 2 && c.width <= 20);
+    /* jadval chizig'i butun kenglikka cho'ziladi, belgi esa ~18 birlik */
+    const marks = cl.filter(c=>{
+      let dark = 0;
+      for(let dx=-19; dx<=19; dx+=1){ if(rd(tx+dx, c.t) < 150) dark++; }
+      return dark <= 26;
+    });
+    counts.push(marks.length);
+    centersList.push(marks.map(c=>c.t));
+  });
+  if(counts.length < 2 || counts[0] !== counts[1] || counts[0] < 4) return null;
+  const rows = counts[0];
+  const rowCenters = centersList[0];
+
+  /* ---- variantlar va ustunlar: o'rtadagi qator bo'ylab dumaloqlar ---- */
+  const midY = rowCenters[Math.floor(rowCenters.length/2)];
+  const rd2 = boxReader(h, 105, midY-10, 895, midY+10);
+  if(!rd2) return {rows, optCount:0, columns:0};
+  /* Dumaloq halqasi markazidan kesib o'tilganda ikkita ingichka chiziq bo'lib
+     ko'rinadi — ularni juftlab, halqa markazini topamiz. */
+  const edges = clustersAlong((tx,dy)=>rd2(tx, midY+dy), 112, 892, 0.5, 3, 1.5)
+    .filter(c => c.width <= 11);
+  const centers = [];
+  for(let i2=0;i2<edges.length-1;i2++){
+    const gap = edges[i2+1].t - edges[i2].t;
+    if(gap >= 14 && gap <= 30){
+      centers.push((edges[i2].t + edges[i2+1].t)/2);
+      i2++;                              // juftlik ishlatildi
+    }
+  }
+  if(centers.length < 8) return {rows, optCount:0, columns:0};
+
+  const gaps = [];
+  for(let i2=1;i2<centers.length;i2++) gaps.push(centers[i2]-centers[i2-1]);
+  const pitch = median(gaps.filter(g => g < 70));
+  /* oraliq 40 (A–E) yoki 44 (A–D) ga yaqin bo'lishi shart, aks holda o'lchov ishonchsiz */
+  if(!pitch || (Math.abs(pitch-40) > 3.5 && Math.abs(pitch-44) > 3.5)){
+    return {rows, optCount:0, columns:0};
+  }
+  const optCount = Math.abs(pitch-44) < Math.abs(pitch-40) ? 4 : 5;
+  let columns = 1;
+  gaps.forEach(g=>{ if(g > pitch*1.8) columns++; });
+  /* topilgan dumaloqlar soni kutilganiga yaqin bo'lmasa — ishonchsiz */
+  if(centers.length < columns*optCount*0.8) return {rows, optCount:0, columns:0};
+
+  return {rows, optCount, columns, pitch, bubbles: centers.length};
+}
+
+function checkSheetGeometry(h){
+  const box = document.getElementById('geomWarn');
+  const txt = document.getElementById('geomWarnText');
+  const btn = document.getElementById('geomFixBtn');
+  box.style.display = 'none';
+  btn.style.display = 'none';
+  btn.onclick = null;
+
+  let m = null;
+  try{ m = measureSheet(h); }catch(e){ console.warn('geometriya o\'lchanmadi', e); }
+  if(!m || !m.rows) return;
+
+  const myCols = COL_XS.length;
+  const myRows = state.layout.rows;
+
+  if(m.columns && m.optCount && m.columns !== myCols){
+    box.style.display = 'block';
+    txt.innerHTML = `<b>Bu varaq ilovaning hozirgi ko'rinishiga mos emas.</b><br>`
+      + `Suratdagi varaqda <b>${m.columns} ta ustun</b> bor, ilova esa ${myCols} ustunli varaq bilan ishlaydi. `
+      + `Bu eski varaq bo'lsa kerak — yangisini chop etib, o'shani ishlating.`;
+    return;
+  }
+
+  const wrongRows = Math.abs(m.rows - myRows) >= 1;
+  const wrongOpts = m.optCount && m.optCount !== state.optCount;
+  if(!wrongRows && !wrongOpts) return;
+
+  const suggestCount = m.rows * myCols;
+  const suggestOpt = m.optCount || state.optCount;
+  const parts = [];
+  if(wrongRows) parts.push(`varaqda <b>${m.rows} ta qator</b> (≈ ${suggestCount} ta savol), sozlamada esa ${myRows} ta qator (${state.count} ta savol)`);
+  if(wrongOpts) parts.push(`varaqda <b>${suggestOpt} ta variant</b> (A–${suggestOpt===5?'E':'D'}), sozlamada ${state.optCount} ta`);
+
+  box.style.display = 'block';
+  txt.innerHTML = `<b>Sozlama varaqqa mos emas:</b> ${parts.join('; ')}.<br>`
+    + `Shu holatda tekshiruv nuqtalari dumaloqlarga tushmaydi va natija xato chiqadi.`;
+  btn.style.display = 'inline-flex';
+  btn.textContent = `Sozlamani moslashtirish → ${suggestCount} ta savol, A–${suggestOpt===5?'E':'D'}`;
+  btn.onclick = ()=>{
+    requestCountChange(suggestCount, suggestOpt);
+    box.style.display = 'none';
+    toast("Sozlama o'zgartirildi — \"Joylashuvni ko'rish\"ni qayta bosing.");
+    exitAlignPreview();
+    redrawCalib();
+  };
+}
+
+/* =========================================================
    DETECTION
    ========================================================= */
 document.getElementById('confirmAnalyzeBtn').addEventListener('click', async ()=>{
@@ -1966,10 +2145,13 @@ document.getElementById('confirmAnalyzeBtn').addEventListener('click', async ()=
      Qog'oz bukilgan yoki nusxa kichraygan bo'lsa belgi kutilgan joydan ancha
      siljigan bo'lishi mumkin, shuning uchun tor oyna emas, butun chiziq qidiriladi. */
   const rowsN = state.layout.rows;
+  const bandCounts = [];
   function stripOffsets(templX){
     const pad = Math.max(20, state.layout.rowHeight*1.7);
     const yTop = START_Y - pad;
-    const yBot = START_Y + state.layout.rows*state.layout.rowHeight + pad;
+    /* Pastki chegara butun mumkin bo'lgan jadval maydonini qamraydi — shunda varaqda
+       sozlamadagidan ko'proq qator bo'lsa, buni sezib ogohlantira olamiz. */
+    const yBot = Math.max(START_Y + state.layout.rows*state.layout.rowHeight + pad, FOOT_Y - 26);
     /* Butun chiziq bo'ylab piksellarni bir marta o'qib olamiz, lekin tahlilni
        VARAQ koordinatalarida qilamiz — shunda varaq qiya yoki burilgan bo'lsa ham
        oynaga begona narsa qo'shilmaydi. */
@@ -2024,16 +2206,24 @@ document.getElementById('confirmAnalyzeBtn').addEventListener('click', async ()=
       } else k2++;
     }
     if(!bands.length) return out;
+    bandCounts.push(bands.length);
 
     // 3) har bir band uchun x-markazini ham o'lchaymiz
     bands.forEach(b=>{
-      let wsum = 0, wx = 0;
-      for(let dx = -12; dx <= 12; dx += 0.5){
+      let wsum = 0, wx = 0, darkN = 0;
+      for(let dx = -13; dx <= 13; dx += 0.5){
         const v = sampleT(templX+dx, b.ty);
-        if(v < thr){ const g = thr - v; wsum += g; wx += (templX+dx)*g; }
+        if(v < thr){ const g = thr - v; wsum += g; wx += (templX+dx)*g; darkN++; }
       }
       b.tx = wsum > 0 ? wx/wsum : templX;
+      b.wid = darkN*0.5;          // qora qismning kengligi (varaq birligida)
     });
+    /* Jadval chizig'i belgidan ancha keng bo'ladi — uni chiqarib tashlaymiz */
+    for(let i4=bands.length-1; i4>=0; i4--){
+      if(bands[i4].wid > TIM.w*1.45 || bands[i4].wid < TIM.w*0.35) bands.splice(i4,1);
+    }
+    if(!bands.length) return out;
+    bandCounts[bandCounts.length-1] = bands.length;
 
     // 4) qatorlarga moslashtirish — oraliq mos kelishi shart
     const pitch = state.layout.rowHeight;
@@ -2146,25 +2336,42 @@ document.getElementById('confirmAnalyzeBtn').addEventListener('click', async ()=
       const lOut = sampleLum(o.cx,o.cy,rOut,off);
       dark[k] = Math.min(lIn, lOut);
     }
-    results.push({q:it.q, col:it.col, row:it.row, dark});
+    /* Toza qog'oz darajasi dumaloqlarning ORASIDAN o'lchanadi — shunda savolning
+       hamma javoblari bo'yalgan bo'lsa ham chegara to'g'ri hisoblanadi. */
+    const gaps = [];
+    const letters = Object.keys(it.options);
+    for(let gi=0; gi<letters.length-1; gi++){
+      const a = it.options[letters[gi]], b = it.options[letters[gi+1]];
+      gaps.push(sampleLum((a.cx+b.cx)/2, a.cy, 3, off));
+    }
+    gaps.sort((x,y)=>x-y);
+    const paperLocal = gaps.length ? gaps[Math.floor(0.75*(gaps.length-1))] : 230;
+    results.push({q:it.q, col:it.col, row:it.row, dark, paper: paperLocal});
   });
 
   // Har bir dumaloq alohida baholanadi: "bo'yalganmi yoki yo'q".
   // "Toza qog'oz" darajasi butun varaq uchun bitta emas, har bir savolning
   // atrofidagi dumaloqlardan olinadi — shunda varaqqa soya tushsa ham,
   // yorug'lik notekis bo'lsa ham chegara o'sha joyga moslashadi.
+  /* Yon-atrofdagi savollardan ham zaxira qiymat olamiz — dumaloqlar orasiga
+     bo'yoq chiqib ketgan holatda mahalliy o'lchov buzilishi mumkin. */
   const byPos = new Map();
   results.forEach(r => byPos.set(r.col + ':' + r.row, r));
+  const allPaper = results.map(r=>r.paper).sort((a,b)=>a-b);
+  const paperSheet = allPaper[Math.floor(allPaper.length*0.5)] || 230;
 
   results.forEach(r=>{
-    const vals = [];
+    const neigh = [];
     for(let d=-3; d<=3; d++){
       const nb = byPos.get(r.col + ':' + (r.row + d));
-      if(nb) for(const k in nb.dark) vals.push(nb.dark[k]);
+      if(nb) neigh.push(nb.paper);
     }
-    vals.sort((a,b)=>a-b);
-    const pv = p => vals[Math.min(vals.length-1, Math.floor(vals.length*p))];
-    const paper = pv(0.70), ink = pv(0.05);
+    neigh.sort((a,b)=>a-b);
+    const paperNeigh = neigh.length ? neigh[Math.floor(neigh.length*0.6)] : paperSheet;
+    // ikkalasidan yorug'rog'i olinadi (bo'yoq tekkan joy chegarani pasaytirmasin)
+    const paper = Math.max(r.paper, paperNeigh*0.92);
+    const vals = Object.values(r.dark);
+    const ink = Math.min(...vals);
     const contrast = Math.max(20, paper - ink);
     const cut = paper - Math.max(18, paper*0.22, contrast*0.40);
 
@@ -2177,6 +2384,38 @@ document.getElementById('confirmAnalyzeBtn').addEventListener('click', async ()=
     else if(marked.length === 1) r.choice = marked[0];
     else                          r.choice = '?';   // 2, 3, 4 yoki 5 tasi belgilangan
   });
+
+  /* ---- varaq sozlamalarga mos keladimi? ---- */
+  const warnParts = [];
+  const cnts = bandCounts.slice().sort((a,b)=>a-b);
+  const medBands = cnts.length ? cnts[Math.floor(cnts.length/2)] : 0;
+  if(medBands >= 3 && Math.abs(medBands - rowsN) >= 2){
+    const guess = medBands * COL_XS.length;
+    warnParts.push(`Varaqda <b>${medBands} qator</b> bor (taxminan <b>${guess} ta savol</b>), sozlamada esa `
+      + `${rowsN} qator (${state.count} ta savol). 1-bosqichdagi "Savollar soni"ni to'g'rilab, qaytadan tekshiring.`);
+  }
+  /* E ustunida bosilgan dumaloq bormi? (A-D / A-E ni farqlash) */
+  let eSum = 0, bSum = 0, eN = 0;
+  for(let row=0; row<Math.min(rowsN, 8); row++){
+    const cy = START_Y + row*state.layout.rowHeight + state.layout.rowHeight/2;
+    const off = rowOffset(row, COL_XS[0] + 205);
+    eSum += sampleLum(COL_XS[0] + 205, cy, state.layout.radius*1.25, off);
+    bSum += sampleLum(COL_XS[0] + 252, cy, state.layout.radius*1.25, off);
+    eN++;
+  }
+  if(eN){
+    const hasE = (eSum/eN) < (bSum/eN)*0.94;
+    if(state.optCount === 4 && hasE){
+      warnParts.push(`Varaqda <b>5 ta variant (A-E)</b> chop etilgan, sozlamada esa 4 ta (A-D). `
+        + `1-bosqichda "Variantlar"ni <b>5 ta (A-E)</b> qilib qo'ying.`);
+    } else if(state.optCount === 5 && !hasE){
+      warnParts.push(`Varaqda <b>4 ta variant (A-D)</b> chop etilganga o'xshaydi, sozlamada esa 5 ta (A-E). `
+        + `1-bosqichda "Variantlar"ni <b>4 ta (A-D)</b> qilib qo'ying.`);
+    }
+  }
+  state.sheetWarning = warnParts.length
+    ? "<b>Varaq sozlamalarga mos emas — natija noto'g'ri chiqadi!</b><br>" + warnParts.join('<br>')
+    : '';
 
   /* ---- o'quvchi raqami va variant dumaloqlari ---- */
   const extra = [];
@@ -2222,6 +2461,9 @@ document.getElementById('confirmAnalyzeBtn').addEventListener('click', async ()=
     if(fixedRows < rowsTotal*0.5){
       toast(`Diqqat: qator belgilari ${fixedRows}/${rowsTotal} topildi — varaqni to'liq va yorug' suratga oling.`);
     }
+  }
+  if(state.sheetWarning){
+    toast("Varaq sozlamalarga mos emas — yuqoridagi ogohlantirishni o'qing.");
   }
   const multi = results.filter(r=>r.choice==='?').length;
   const empty = results.filter(r=>r.choice===null).length;
@@ -2308,6 +2550,11 @@ document.getElementById('scanVariantSelect').addEventListener('change', updateKe
 
 function renderVerify(){
   updateKeyStatus();
+  const mw = document.getElementById('mismatchWarn');
+  if(mw){
+    if(state.sheetWarning){ mw.style.display = 'block'; mw.innerHTML = state.sheetWarning; }
+    else mw.style.display = 'none';
+  }
   const table = document.getElementById('verifyTable');
   const onlyIssues = document.getElementById('onlyIssues').checked;
   let multi = 0, empty = 0, ok = 0;
